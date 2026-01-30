@@ -46,59 +46,40 @@ def get_live_forecast(days=11, lat=-23.55, lon=-46.63):
         st.warning(f"⚠️ Não foi possível buscar o clima online. Usando médias históricas. Erro: {e}")
         return None
 
-# --- 2. FUNÇÕES DO MOTOR DE DADOS (CORRIGIDA) ---
+# --- 2. FUNÇÕES DO MOTOR DE DADOS ---
 @st.cache_data
 def load_data(uploaded_file):
-    # 1. Tenta ler CSV com diferentes separadores
     try:
         df = pd.read_csv(uploaded_file, sep=',')
-        if df.shape[1] < 2: # Se ficou tudo numa coluna só, tenta ponto e vírgula
+        if df.shape[1] < 2:
             df = pd.read_csv(uploaded_file, sep=';')
     except:
-        # Se falhar, tenta Excel
         df = pd.read_excel(uploaded_file)
         
-    # 2. Limpeza dos nomes das colunas (remove espaços extras)
     df.columns = df.columns.str.strip()
     
-    # 3. Mapeamento Inteligente de Colunas (O segredo da correção)
-    # Dicionário: "Nome que pode vir no Excel" : "Nome padrão do Sistema"
     rename_map = {
-        'Data': 'Date',
-        'Dia': 'Date',
-        'Cod- SKU': 'SKU',
-        'Código': 'SKU',
-        'Produto.DS_PRODUTO': 'Description',
-        'Descrição': 'Description',
-        'Produto': 'Description',
-        'Qtde': 'Orders',
-        'Pedidos': 'Orders',
-        'Quantidade': 'Orders',
-        'Qtd': 'Orders'
+        'Data': 'Date', 'Dia': 'Date',
+        'Cod- SKU': 'SKU', 'Código': 'SKU',
+        'Produto.DS_PRODUTO': 'Description', 'Descrição': 'Description', 'Produto': 'Description',
+        'Qtde': 'Orders', 'Pedidos': 'Orders', 'Quantidade': 'Orders', 'Qtd': 'Orders'
     }
-    
-    # Renomeia o que encontrar
     df = df.rename(columns=rename_map)
     
-    # 4. Verifica se as colunas essenciais existem
     required_cols = ['Date', 'SKU', 'Orders']
     missing = [c for c in required_cols if c not in df.columns]
     
     if missing:
-        # Fallback de emergência (por posição) caso os nomes mudem drasticamente
         if len(df.columns) >= 4:
-            st.warning("⚠️ Nomes de colunas não reconhecidos. Tentando ler pela ordem: 1=Data, 2=SKU, 3=Desc, 4=Vendas")
-            # Assume ordem: Data, SKU, Descrição, Vendas
+            st.warning("⚠️ Tentando ler colunas pela ordem padrão...")
             df.columns = ['Date', 'SKU', 'Description', 'Orders'] + list(df.columns[4:])
         else:
-            st.error(f"❌ Erro: O arquivo não tem as colunas necessárias. Faltando: {missing}")
+            st.error(f"❌ Erro: Faltando colunas {missing}")
             st.stop()
             
-    # Se não tiver descrição, cria uma genérica
     if 'Description' not in df.columns:
         df['Description'] = 'Produto ' + df['SKU'].astype(str)
 
-    # 5. Tratamento de Tipos
     df = df[['Date', 'SKU', 'Description', 'Orders']]
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df = df.dropna(subset=['Date'])
@@ -121,18 +102,16 @@ def run_forecast(df_hist, days_ahead=11):
     end_date_hist = df_hist['Date'].max()
     dates_future = pd.date_range(start=df_hist['Date'].min(), end=end_date_hist + timedelta(days=days_ahead))
     
-    # Setup Climático
+    # Clima
     real_forecast = get_live_forecast(days=days_ahead)
     df_dates = pd.DataFrame({'Date': dates_future})
     
-    # Simula Histórico
     np.random.seed(42)
     df_dates['Temp_Avg'] = np.random.normal(25, 3, len(df_dates))
     df_dates['Rain_mm'] = np.where(df_dates['Date'].dt.month.isin([1,2,3,12]), 
                                    np.random.exponential(8, len(df_dates)), 
                                    np.random.exponential(4, len(df_dates)))
     
-    # Merge Clima Real
     if real_forecast is not None:
         real_forecast['Date'] = pd.to_datetime(real_forecast['Date'])
         for idx, row in real_forecast.iterrows():
@@ -141,7 +120,6 @@ def run_forecast(df_hist, days_ahead=11):
                 df_dates.loc[mask, 'Temp_Avg'] = row['Temp_Avg']
                 df_dates.loc[mask, 'Rain_mm'] = row['Rain_mm']
     
-    # Merge SKUs
     unique_skus = df_hist[['SKU', 'Description']].drop_duplicates()
     unique_skus['key'] = 1
     df_dates['key'] = 1
@@ -161,10 +139,12 @@ def run_forecast(df_hist, days_ahead=11):
     model = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, n_jobs=-1)
     model.fit(train[features], train['Orders'])
     
-    # Regra Vero (Novo Cliente)
+    # --- ATUALIZAÇÃO: REGRA DE PRODUTOS VERO (Incluindo Primavera e Roxa) ---
+    # Busca produtos com "Vero", "Primavera" ou "Roxa" no nome
+    vero_mask = df_hist['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
+    
     last_3_days = end_date_hist - timedelta(days=3)
-    vero_data = df_hist[(df_hist['Date'] > last_3_days) & 
-                        (df_hist['Description'].str.lower().str.contains('vero'))]
+    vero_data = df_hist[(df_hist['Date'] > last_3_days) & vero_mask]
     vero_means = vero_data.groupby('SKU')['Orders'].mean()
     
     # Loop Previsão
@@ -223,16 +203,17 @@ if uploaded_file is not None:
                     fig_w.add_bar(x=weather_used['Date'], y=weather_used['Rain_mm'], name='Chuva (mm)')
                     col_w1.plotly_chart(fig_w, use_container_width=True)
                 
-                # KPI Cards
+                # KPI Cards (Atualizado para incluir Primavera/Roxa no total Vero)
                 total_vol = int(forecast['Orders'].sum())
-                # Tratamento seguro para string contains
-                vero_mask = forecast['Description'].astype(str).str.lower().str.contains('vero', na=False)
-                vero_vol = int(forecast[vero_mask]['Orders'].sum())
+                
+                # Filtro Vero atualizado na visualização também
+                vero_display_mask = forecast['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True, na=False)
+                vero_vol = int(forecast[vero_display_mask]['Orders'].sum())
                 
                 st.divider()
                 col1, col2 = st.columns(2)
                 col1.metric("Volume Total (11 dias)", f"{total_vol:,}")
-                col2.metric("Volume Linha Vero", f"{vero_vol:,}")
+                col2.metric("Volume Linha Vero + Especiais", f"{vero_vol:,}")
                 
                 # Gráfico
                 st.subheader("📈 Previsão de Vendas Detalhada")
