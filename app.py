@@ -6,8 +6,8 @@ from datetime import timedelta
 import requests
 import holidays
 
-st.set_page_config(page_title="Forecasting XGBoost Clean", layout="wide")
-st.title("📊 Previsão de Vendas (14 Dias) - XGBoost Otimizado")
+st.set_page_config(page_title="Forecasting Vero 2025+", layout="wide")
+st.title("📊 Previsão de Vendas (Foco Vero 2025+)")
 
 # --- 1. FUNÇÕES AUXILIARES ---
 def get_holidays_calendar(start_date, end_date):
@@ -49,41 +49,50 @@ def load_data(uploaded_file):
     
     return df.groupby(['Date','SKU','Description'])['Orders'].sum().reset_index()
 
-# --- 3. PRÉ-PROCESSAMENTO INTELIGENTE (NOVO) ---
-def clean_outliers(df):
+# --- 3. FILTRO DE HISTÓRICO VERO (NOVO) ---
+def filter_history_vero(df):
     """
-    Remove picos de implantação (ex: dia 26/01) para não confundir o Machine Learning.
-    Substitui valores > 3x a mediana recente pela própria mediana.
+    Remove dados antigos (antes de 2025) APENAS para a linha Vero/Primavera/Roxa.
+    Para os outros produtos, mantém o histórico completo.
     """
-    df = df.sort_values(['SKU', 'Date'])
+    # Identifica linhas Vero
+    vero_mask = df['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
     
-    # Identifica itens Vero
+    # Regra 1: Se for Vero, Data deve ser >= 2025
+    keep_vero = vero_mask & (df['Date'] >= '2025-01-01')
+    
+    # Regra 2: Se NÃO for Vero, mantém tudo
+    keep_others = ~vero_mask
+    
+    # Junta as duas partes
+    df_filtered = df[keep_vero | keep_others].copy()
+    
+    return df_filtered
+
+def clean_outliers(df):
+    # Limpeza suave de picos extremos para não confundir o treino
+    df = df.sort_values(['SKU', 'Date'])
     vero_mask = df['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
     vero_skus = df[vero_mask]['SKU'].unique()
     
-    df_clean = df.copy()
-    
     for sku in vero_skus:
-        # Pega histórico do SKU
-        mask = df_clean['SKU'] == sku
-        series = df_clean.loc[mask, 'Orders']
-        
-        # Calcula mediana móvel (janela de 14 dias) para ter uma base de comparação
+        mask = df['SKU'] == sku
+        series = df.loc[mask, 'Orders']
         rolling_median = series.rolling(window=14, min_periods=1, center=True).median()
-        
-        # Se o valor for > 4x a mediana local (Pico absurdo), substitui pela mediana
-        # Isso mata o dia 26/01 (10k) transformando-o em algo como 2.5k (se a mediana for essa)
-        is_outlier = series > (rolling_median * 4)
-        
+        # Tolerância maior (4x) para aceitar picos de venda, mas cortar implantação absurda
+        is_outlier = series > (rolling_median * 4) 
         if is_outlier.any():
-            df_clean.loc[mask & is_outlier, 'Orders'] = rolling_median[is_outlier]
+            df.loc[mask & is_outlier, 'Orders'] = rolling_median[is_outlier]
             
-    return df_clean
+    return df
 
-# --- 4. MOTOR DE PREVISÃO (XGBOOST PURO) ---
+# --- 4. MOTOR DE PREVISÃO ---
 def run_forecast(df_hist_raw, days_ahead=14):
-    # 1. Limpeza de Dados ("Sanitização")
-    df_hist = clean_outliers(df_hist_raw)
+    # APLICAR O FILTRO DE DATA AQUI
+    df_hist = filter_history_vero(df_hist_raw)
+    
+    # Limpeza de outliers
+    df_hist = clean_outliers(df_hist)
     
     end_date_hist = df_hist['Date'].max()
     dates_future = pd.date_range(df_hist['Date'].min(), end_date_hist + timedelta(days=days_ahead))
@@ -113,9 +122,13 @@ def run_forecast(df_hist_raw, days_ahead=14):
     unique_skus['key'] = 1; df_dates['key'] = 1
     df_master = pd.merge(df_dates, unique_skus, on='key').drop('key', axis=1)
     df_master = pd.merge(df_master, df_hist[['Date','SKU','Orders']], on=['Date','SKU'], how='left')
+    
+    # Preenche zeros, mas com cuidado:
+    # Como cortamos 2022-2024 para Vero, esses dados vão aparecer como NaN no merge com df_dates antigos.
+    # Vamos preencher com 0, o que é correto (para o modelo, é como se o produto não existisse antes).
     df_master.loc[df_master['Date'] <= end_date_hist, 'Orders'] = df_master.loc[df_master['Date'] <= end_date_hist, 'Orders'].fillna(0)
 
-    # Features (Agora geradas com dados limpos!)
+    # Features
     def gen_feat(d):
         d = d.sort_values(['SKU', 'Date'])
         d['DayOfWeek'] = d['Date'].dt.dayofweek
@@ -125,11 +138,13 @@ def run_forecast(df_hist_raw, days_ahead=14):
         return d
 
     df_feat = gen_feat(df_master)
+    # Importante: O dropna aqui vai remover 2022-2024 para Vero automaticamente, 
+    # pois geramos features baseadas na data. O treino será focado em 2025+.
     train = df_feat[df_feat['Date'] <= end_date_hist].dropna()
     
-    # Treino (XGBoost Ativado para TODOS)
+    # Treino (XGBoost)
     feat_cols = ['DayOfWeek','IsWeekend','IsHoliday','Temp_Avg','Rain_mm','lag_1','lag_7','rolling_mean_7']
-    model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1) # Ajuste fino de hiperparâmetros
+    model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1)
     model.fit(train[feat_cols], train['Orders'])
 
     # Loop Previsão
@@ -152,7 +167,7 @@ def run_forecast(df_hist_raw, days_ahead=14):
         curr = pd.concat([curr, row], sort=False)
         prog.progress(i/days_ahead)
         
-    return pd.concat(preds), df_hist_raw # Retorna dados raw para comparativo real
+    return pd.concat(preds), df_hist_raw
 
 # --- 5. INTERFACE ---
 uploaded_file = st.file_uploader("📂 Carregue data.xlsx", type=['csv', 'xlsx'])
@@ -161,19 +176,17 @@ if uploaded_file:
     df_raw = load_data(uploaded_file)
     if not df_raw.empty:
         today = df_raw['Date'].max()
-        st.info(f"Dados até: **{today.date()}**")
+        st.info(f"Dados até: **{today.date()}** | Vero considerada a partir de: **01/01/2025**")
         
         if st.button("🚀 Gerar Previsão 14 Dias"):
             forecast, history = run_forecast(df_raw, days_ahead=14)
             
-            # --- PREPARAÇÃO DO ARQUIVO FINAL (PIVOT) ---
-            # Transforma de (Data, SKU, Qtd) para (SKU, Desc, Dia1, Dia2...)
+            # --- PIVOT PARA CSV FINAL (Formato Matriz) ---
             df_pivot = forecast.pivot_table(index=['SKU', 'Description'], 
                                           columns='Date', 
                                           values='Orders', 
                                           aggfunc='sum').reset_index()
             
-            # Formata colunas de data para ficar bonito (ex: 28/01)
             new_cols = []
             for c in df_pivot.columns:
                 if isinstance(c, pd.Timestamp):
@@ -182,10 +195,10 @@ if uploaded_file:
                     new_cols.append(c)
             df_pivot.columns = new_cols
 
-            # --- MÉTRICAS COMPARATIVAS ---
+            # --- MÉTRICAS ---
             f_curr = forecast['Orders'].sum()
             
-            # Comparativo Justo (14 dias alinhados)
+            # Comparativo
             fut_start = today + timedelta(days=1)
             fut_end = today + timedelta(days=14)
             
@@ -198,7 +211,7 @@ if uploaded_file:
             f_2y = history[(history['Date'] >= l2y_start) & (history['Date'] <= l2y_end)]['Orders'].sum()
 
             st.divider()
-            st.subheader("📊 Resumo Executivo")
+            st.subheader("📊 Resumo de Performance")
             
             col1, col2, col3 = st.columns(3)
             col1.metric("Previsão Total (14 Dias)", f"{int(f_curr):,}")
@@ -206,8 +219,8 @@ if uploaded_file:
             col3.metric("vs 2 Anos Atrás (2024)", f"{((f_curr/f_2y)-1)*100:.1f}%" if f_2y else "N/D")
             
             st.write("---")
-            st.write("### 🗓️ Detalhamento Diário por Produto")
+            st.write("### 🗓️ Previsão Detalhada")
             st.dataframe(df_pivot)
             
             csv = df_pivot.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar Planilha Detalhada", csv, "previsao_detalhada_14d.csv", "text/csv")
+            st.download_button("📥 Baixar Planilha Detalhada", csv, "previsao_vero_2025plus.csv", "text/csv")
