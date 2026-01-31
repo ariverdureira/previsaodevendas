@@ -115,7 +115,6 @@ def load_data(uploaded_file):
 # --- 3. PRÉ-PROCESSAMENTO PARA IA ---
 
 def filter_history_vero(df):
-    # Filtra histórico APENAS para o treino da IA
     mask_vero = df['Group'] == 'Vero'
     mask_date = df['Date'] >= '2025-01-01'
     keep = (mask_vero & mask_date) | (~mask_vero)
@@ -148,10 +147,185 @@ def generate_features(df):
     d['lag_14'] = d.groupby('SKU')['Orders'].shift(14)
     d['roll_7'] = d.groupby('SKU')['Orders'].shift(1).rolling(7).mean()
     return d
-
 # --- 4. MOTOR DE PREVISÃO ---
 
 def run_forecast(df_raw, days_ahead=14):
-    # 1. Filtros (Somente para a IA)
     df_train_base = filter_history_vero(df_raw)
-    df_train_base = clean_outliers
+    df_train_base = clean_outliers(df_train_base)
+    
+    last_date = df_train_base['Date'].max()
+    start_date = df_train_base['Date'].min()
+    future_range = pd.date_range(start_date, last_date + timedelta(days=days_ahead))
+    df_dates = pd.DataFrame({'Date': future_range})
+    
+    weather = get_live_forecast(days=days_ahead)
+    np.random.seed(42)
+    df_dates['Temp_Avg'] = np.random.normal(25, 3, len(df_dates))
+    is_summer = df_dates['Date'].dt.month.isin([1, 2, 3, 12])
+    df_dates['Rain_mm'] = np.where(is_summer, np.random.exponential(8, len(df_dates)), 4)
+    
+    if weather is not None:
+        weather['Date'] = pd.to_datetime(weather['Date'])
+        df_dates = pd.merge(df_dates, weather, on='Date', how='left', suffixes=('', '_real'))
+        df_dates['Temp_Avg'] = df_dates['Temp_Avg_real'].fillna(df_dates['Temp_Avg'])
+        df_dates['Rain_mm'] = df_dates['Rain_mm_real'].fillna(df_dates['Rain_mm'])
+        df_dates = df_dates[['Date', 'Temp_Avg', 'Rain_mm']]
+        
+    holidays_df = get_holidays_calendar(df_dates['Date'].min(), df_dates['Date'].max())
+    df_dates = pd.merge(df_dates, holidays_df, on='Date', how='left')
+    df_dates['IsHoliday'] = df_dates['IsHoliday'].fillna(0)
+    
+    unique_skus = df_train_base[['SKU', 'Description', 'Group']].drop_duplicates()
+    unique_skus['key'] = 1
+    df_dates['key'] = 1
+    
+    df_master = pd.merge(df_dates, unique_skus, on='key').drop('key', axis=1)
+    df_master = pd.merge(df_master, df_train_base[['Date','SKU','Orders']], on=['Date','SKU'], how='left')
+    
+    mask_past = df_master['Date'] <= last_date
+    df_master.loc[mask_past, 'Orders'] = df_master.loc[mask_past, 'Orders'].fillna(0)
+    
+    df_feat = generate_features(df_master)
+    train_data = df_feat[df_feat['Date'] <= last_date].dropna()
+    
+    if train_data.empty:
+        st.error("Erro: Dados insuficientes.")
+        return pd.DataFrame()
+        
+    features = ['DayOfWeek','IsWeekend','IsHoliday','Temp_Avg','Rain_mm','lag_1','lag_7','roll_7']
+    model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1)
+    model.fit(train_data[features], train_data['Orders'])
+    
+    preds = []
+    current_df = df_master[df_master['Date'] <= last_date].copy()
+    progress_bar = st.progress(0)
+    
+    for i in range(1, days_ahead + 1):
+        next_day = last_date + timedelta(days=i)
+        
+        cols_static = ['Date','SKU','Description','Group','Temp_Avg','Rain_mm','IsHoliday']
+        next_base = df_master[df_master['Date'] == next_day][cols_static].copy()
+        
+        temp_full = pd.concat([current_df, next_base], sort=False)
+        temp_full = generate_features(temp_full)
+        
+        row_pred = temp_full[temp_full['Date'] == next_day].copy()
+        
+        X_test = row_pred[features].fillna(0)
+        y_pred = model.predict(X_test)
+        
+        row_pred['Orders'] = np.maximum(np.round(y_pred, 0), 0)
+        
+        is_sunday = next_day.dayofweek == 6
+        is_holiday = row_pred['IsHoliday'].values[0] == 1
+        
+        if is_sunday or is_holiday:
+            row_pred['Orders'] = 0
+            
+        preds.append(row_pred)
+        current_df = pd.concat([current_df, row_pred], sort=False)
+        progress_bar.progress(i / days_ahead)
+        
+    return pd.concat(preds)
+
+# --- 5. INTERFACE DO USUÁRIO ---
+
+uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
+
+if uploaded_file:
+    df_raw = load_data(uploaded_file)
+    
+    if not df_raw.empty:
+        max_date = df_raw['Date'].max()
+        st.info(f"Dados até: **{max_date.date()}**")
+        
+        if st.button("🚀 Gerar Previsão"):
+            with st.spinner("Processando..."):
+                try:
+                    forecast = run_forecast(df_raw, days_ahead=14)
+                    
+                    if not forecast.empty:
+                        f_start = max_date + timedelta(days=1)
+                        f_end = max_date + timedelta(days=14)
+                        
+                        ly_start = f_start - timedelta(weeks=52)
+                        ly_end = f_end - timedelta(weeks=52)
+                        l2y_start = f_start - timedelta(weeks=104)
+                        l2y_end = f_end - timedelta(weeks=104)
+                        
+                        hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
+                        hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
+                        
+                        groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis', 'Outros']
+                        summary = []
+                        
+                        for g in groups:
+                            v_curr = forecast[forecast['Group'] == g]['Orders'].sum()
+                            v_ly = hist_ly[hist_ly['Group'] == g]['Orders'].sum()
+                            v_2y = hist_2y[hist_2y['Group'] == g]['Orders'].sum()
+                            
+                            p_ly = ((v_curr / v_ly) - 1) * 100 if v_ly > 0 else 0
+                            p_2y = ((v_curr / v_2y) - 1) * 100 if v_2y > 0 else 0
+                            
+                            summary.append({
+                                'Grupo': g,
+                                'Previsão 14d': int(v_curr),
+                                '2025': int(v_ly),
+                                'Var % (25)': f"{p_ly:+.1f}%",
+                                '2024': int(v_2y),
+                                'Var % (24)': f"{p_2y:+.1f}%"
+                            })
+                            
+                        tot_cur = forecast['Orders'].sum()
+                        tot_ly = hist_ly['Orders'].sum()
+                        tot_2y = hist_2y['Orders'].sum()
+                        
+                        pt_ly = ((tot_cur / tot_ly) - 1) * 100 if tot_ly > 0 else 0
+                        pt_2y = ((tot_cur / tot_2y) - 1) * 100 if tot_2y > 0 else 0
+                        
+                        summary.append({
+                            'Grupo': 'TOTAL GERAL',
+                            'Previsão 14d': int(tot_cur),
+                            '2025': int(tot_ly),
+                            'Var % (25)': f"{pt_ly:+.1f}%",
+                            '2024': int(tot_2y),
+                            'Var % (24)': f"{pt_2y:+.1f}%"
+                        })
+                        
+                        st.divider()
+                        st.subheader("📊 Resumo Executivo")
+                        df_summary = pd.DataFrame(summary)
+                        st.dataframe(df_summary, hide_index=True, use_container_width=True)
+                        
+                        df_piv = forecast.pivot_table(
+                            index=['SKU', 'Description', 'Group'], 
+                            columns='Date', 
+                            values='Orders', 
+                            aggfunc='sum'
+                        ).reset_index()
+                        
+                        num_cols = df_piv.select_dtypes(include=[np.number]).columns
+                        total_row = df_piv[num_cols].sum()
+                        total_row['SKU'] = 'TOTAL'
+                        total_row['Description'] = 'TOTAL GERAL'
+                        total_row['Group'] = '-'
+                        
+                        df_piv = pd.concat([df_piv, pd.DataFrame([total_row])], ignore_index=True)
+                        
+                        cols_fmt = []
+                        for c in df_piv.columns:
+                            if isinstance(c, pd.Timestamp):
+                                cols_fmt.append(c.strftime('%d/%m'))
+                            else:
+                                cols_fmt.append(c)
+                        df_piv.columns = cols_fmt
+                        
+                        st.write("### 🗓️ Previsão Detalhada")
+                        st.dataframe(df_piv)
+                        
+                        csv = df_piv.to_csv(index=False).encode('utf-8')
+                        st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
+                        
+                except Exception as e:
+                    st.error(f"Erro na execução: {e}")
+                    st.write(traceback.format_exc())
