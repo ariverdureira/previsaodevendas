@@ -410,3 +410,48 @@ if uploaded_file:
                                         
                         except Exception as e:
                             st.error(f"Erro na IA: {e}")
+# ... (código anterior mantido) ...
+
+                    st.divider()
+                    st.subheader("🤖 Analista IA (Gemini)")
+                    
+                    api_key = st.text_input("Cole sua Google Gemini API Key:", type="password")
+                    
+                    if api_key:
+                        try:
+                            # Configuração Específica para PandasAI 1.5.5
+                            llm = GoogleGemini(api_key=api_key)
+                            
+                            # Prepara dados (Histórico + Previsão)
+                            df_history_clean = history[history['Date'] >= '2024-01-01'][['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
+                            df_forecast_clean = forecast[['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
+                            df_ai = pd.concat([df_history_clean, df_forecast_clean])
+                            df_ai['Date'] = df_ai['Date'].astype(str) # PandasAI 1.5 prefere data como texto
+                            
+                            # Cria o SmartDataframe (Sintaxe 1.5.5)
+                            sdf = SmartDataframe(
+                                df_ai, 
+                                config={"llm": llm}
+                            )
+                            
+                            st.info("💡 Ex: 'Qual SKU vendeu mais?' ou 'Faça um gráfico de barras por Grupo'")
+                            query = st.text_area("Pergunte aos dados:")
+                            
+                            if st.button("Perguntar à IA"):
+                                with st.spinner("Analisando..."):
+                                    # Na versão 1.5 o método é chat() direto
+                                    resposta = sdf.chat(query)
+                                    
+                                    # O PandasAI 1.5 às vezes retorna o caminho da imagem, às vezes o plot
+                                    if isinstance(resposta, str) and ".png" in resposta:
+                                        try:
+                                            st.image(resposta)
+                                        except:
+                                            st.write(resposta)
+                                    elif isinstance(resposta, pd.DataFrame):
+                                        st.dataframe(resposta)
+                                    else:
+                                        st.write(resposta)
+                                        
+                        except Exception as e:
+                            st.error(f"Erro: {e}")
