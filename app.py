@@ -7,6 +7,9 @@ import requests
 import holidays
 import traceback
 import re
+from pandasai import SmartDataframe
+from pandasai.llm import GoogleGemini
+import matplotlib.pyplot as plt # Garante que gráficos funcionem
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Forecasting Final", layout="wide")
@@ -350,3 +353,60 @@ if uploaded_file:
                 except Exception as e:
                     st.error(f"Erro na execução: {e}")
                     st.write(traceback.format_exc())
+# ... (Todo o código anterior da tabela detalhada e download button) ...
+
+                    st.divider()
+                    st.subheader("🤖 Analista IA (Gemini)")
+                    
+                    # Campo para a API Key (para não deixar chumbada no código por segurança)
+                    api_key = st.text_input("Cole sua Google Gemini API Key:", type="password")
+                    
+                    if api_key:
+                        try:
+                            # 1. Configura o LLM
+                            llm = GoogleGemini(api_key=api_key)
+                            
+                            # 2. Prepara os dados para a IA
+                            # Vamos dar para a IA tanto o histórico quanto a previsão juntos
+                            # Para ela ter a visão completa (Passado + Futuro)
+                            
+                            # Pega histórico recente (ex: 2024 e 2025) para não ficar pesado demais
+                            df_history_clean = history[history['Date'] >= '2024-01-01'][['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
+                            df_forecast_clean = forecast[['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
+                            
+                            # Junta tudo num "Dataframe Mestre"
+                            df_ai = pd.concat([df_history_clean, df_forecast_clean])
+                            df_ai['Date'] = df_ai['Date'].dt.date # Simplifica data
+                            
+                            # 3. Cria o Cérebro (SmartDataframe)
+                            sdf = SmartDataframe(
+                                df_ai, 
+                                config={
+                                    "llm": llm,
+                                    "custom_whitelisted_dependencies": ["matplotlib", "seaborn"],
+                                    "save_charts": False, # Exibe direto no Streamlit
+                                    "open_charts": False,
+                                }
+                            )
+                            
+                            # 4. Interface de Chat
+                            st.info("💡 Exemplo: 'Qual SKU do grupo Vero vendeu mais em Janeiro de 2025?' ou 'Faça um gráfico de barras das vendas por Grupo na previsão.'")
+                            
+                            query = st.text_area("Pergunte algo sobre os dados:")
+                            
+                            if st.button("Perguntar à IA"):
+                                with st.spinner("A IA está analisando os dados..."):
+                                    resposta = sdf.chat(query)
+                                    
+                                    # Se a resposta for um caminho de imagem (gráfico gerado)
+                                    if isinstance(resposta, str) and ".png" in resposta:
+                                        st.image(resposta)
+                                    # Se for um dataframe
+                                    elif isinstance(resposta, pd.DataFrame):
+                                        st.dataframe(resposta)
+                                    # Se for texto/número
+                                    else:
+                                        st.write(resposta)
+                                        
+                        except Exception as e:
+                            st.error(f"Erro na IA: {e}")
