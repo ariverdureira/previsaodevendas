@@ -7,8 +7,8 @@ import plotly.express as px
 import requests
 import holidays
 
-st.set_page_config(page_title="Forecasting Completo", layout="wide")
-st.title("📊 Previsão de Vendas (14 Dias) & Comparativo 2 Anos")
+st.set_page_config(page_title="Forecasting 14 Dias", layout="wide")
+st.title("📊 Previsão de Vendas (14 Dias) - Comparativo Justo")
 
 # --- 1. FUNÇÕES AUXILIARES ---
 def get_holidays_calendar(start_date, end_date):
@@ -100,21 +100,22 @@ def run_forecast(df_hist, days_ahead=14):
     model = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, n_jobs=-1)
     model.fit(train[feat_cols], train['Orders'])
 
-    # Lift Vero (Com trava de segurança para picos)
+    # Lift Vero Inteligente (Compara Terça x Terça)
     last_day = end_date_hist
-    compare_day = end_date_hist - timedelta(days=7)
+    compare_day = end_date_hist - timedelta(days=7) # Compara com a mesma semana anterior
     
     vero_mask = df_hist['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
     vero_skus = df_hist[vero_mask]['SKU'].unique()
     
     lift_factors = {}
     for sku in vero_skus:
+        # Pega volume do último dia real e do mesmo dia na semana anterior
         sales_new = df_hist[(df_hist['Date'] == last_day) & (df_hist['SKU'] == sku)]['Orders'].sum()
         sales_old = df_hist[(df_hist['Date'] == compare_day) & (df_hist['SKU'] == sku)]['Orders'].sum()
         
         if sales_new > 0 and sales_old > 10:
             factor = sales_new / sales_old
-            factor = min(factor, 2.5) # Limita picos artificiais
+            factor = min(factor, 2.5) # Trava anti-pico
             factor = max(factor, 1.0)
         else:
             factor = 1.0
@@ -158,54 +159,52 @@ if uploaded_file:
         if st.button("🚀 Gerar Previsão 14 Dias"):
             forecast, history = run_forecast(df_raw, days_ahead=14)
             
-            # --- CÁLCULO DAS MÉTRICAS COMPARATIVAS ---
+            # --- MÉTRICAS COMPARATIVAS (AJUSTE FINO) ---
             
-            # 1. Passado (Últimas 3 semanas)
+            # 1. Passado (21 dias vs 21 dias)
             past_start = today - timedelta(days=20)
             p_curr = history[(history['Date']>=past_start) & (history['Date']<=today)]['Orders'].sum()
             p_ly = history[(history['Date']>=past_start-timedelta(weeks=52)) & (history['Date']<=today-timedelta(weeks=52))]['Orders'].sum()
             p_2y = history[(history['Date']>=past_start-timedelta(weeks=104)) & (history['Date']<=today-timedelta(weeks=104))]['Orders'].sum()
             
-            # 2. Futuro (Próximas 2 semanas)
-            fut_end = today + timedelta(days=14)
+            # 2. Futuro (14 dias vs 14 dias)
             f_curr = forecast['Orders'].sum()
             
-            # Comparativo Futuro vs Ano Passado (LY - 52 semanas)
-            f_ly = history[(history['Date']>today-timedelta(weeks=52)) & (history['Date']<=today-timedelta(weeks=52)+timedelta(days=14))]['Orders'].sum()
+            # O Segredo: Definir janela exata de 14 dias para o passado
+            # Data de hoje + 1 dia (inicio previsao) até +14 dias
+            fut_start_date = today + timedelta(days=1)
+            fut_end_date = today + timedelta(days=14)
             
-            # Comparativo Futuro vs 2 Anos Atrás (2Y - 104 semanas) -> A PARTE QUE FALTOU ANTES
-            f_2y = history[(history['Date']>today-timedelta(weeks=104)) & (history['Date']<=today-timedelta(weeks=104)+timedelta(days=14))]['Orders'].sum()
+            # Ano Passado (Alinhado por Semanas)
+            ly_start = fut_start_date - timedelta(weeks=52)
+            ly_end = fut_end_date - timedelta(weeks=52)
+            f_ly = history[(history['Date'] >= ly_start) & (history['Date'] <= ly_end)]['Orders'].sum()
+            
+            # 2 Anos Atrás
+            l2y_start = fut_start_date - timedelta(weeks=104)
+            l2y_end = fut_end_date - timedelta(weeks=104)
+            f_2y = history[(history['Date'] >= l2y_start) & (history['Date'] <= l2y_end)]['Orders'].sum()
 
-            # --- EXIBIÇÃO ---
+            # --- DISPLAY ---
             st.divider()
-            st.subheader("📊 Relatório de Performance e Tendência")
+            st.subheader("📊 Relatório de Performance (Comparativo Justo)")
             
             col1, col2 = st.columns(2)
             with col1:
-                st.markdown("#### 🔙 Realizado (Últimos 21 Dias)")
-                st.metric("Volume Total", f"{int(p_curr):,}")
-                st.metric("Cresc. vs Ano Passado", f"{((p_curr/p_ly)-1)*100:.1f}%")
-                st.metric("Cresc. vs 2 Anos Atrás", f"{((p_curr/p_2y)-1)*100:.1f}%")
+                st.markdown("#### 🔙 Passado (21 Dias)")
+                st.metric("Volume Realizado", f"{int(p_curr):,}")
+                st.metric("vs Ano Passado", f"{((p_curr/p_ly)-1)*100:.1f}%")
+                st.metric("vs 2 Anos Atrás", f"{((p_curr/p_2y)-1)*100:.1f}%")
             
             with col2:
-                st.markdown("#### 🔜 Previsão (Próximos 14 Dias)")
+                st.markdown("#### 🔜 Futuro (14 Dias)")
                 st.metric("Volume Projetado", f"{int(f_curr):,}")
-                
-                # Exibe variação vs Ano Passado (se houver dados)
-                if f_ly > 0:
-                    st.metric("Cresc. Projetado vs Ano Passado", f"{((f_curr/f_ly)-1)*100:.1f}%")
-                else:
-                    st.metric("Cresc. vs Ano Passado", "N/D")
-                    
-                # Exibe variação vs 2 Anos Atrás (NOVO)
-                if f_2y > 0:
-                    st.metric("Cresc. Projetado vs 2 Anos Atrás", f"{((f_curr/f_2y)-1)*100:.1f}%")
-                else:
-                    st.metric("Cresc. vs 2 Anos Atrás", "N/D")
+                st.metric("vs Ano Passado", f"{((f_curr/f_ly)-1)*100:.1f}%" if f_ly > 0 else "N/D")
+                st.metric("vs 2 Anos Atrás", f"{((f_curr/f_2y)-1)*100:.1f}%" if f_2y > 0 else "N/D")
             
+            st.caption(f"*Período de Comparação Futura: {fut_start_date.strftime('%d/%m')} a {fut_end_date.strftime('%d/%m')} vs Mesmas Semanas dos Anos Anteriores.")
             st.divider()
             
-            # Gráfico e Download
             sel_sku = st.selectbox("Produto:", forecast['Description'].unique())
             fig = px.line(forecast[forecast['Description']==sel_sku], x='Date', y='Orders', markers=True, title=sel_sku)
             st.plotly_chart(fig, use_container_width=True)
