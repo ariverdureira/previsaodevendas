@@ -54,7 +54,7 @@ def classify_group(desc):
     if not isinstance(desc, str): return 'Outros'
     desc_lower = desc.lower()
     
-    # 1. Americana Bola
+    # 1. Prioridade: Americana Bola
     if 'americana bola' in desc_lower: 
         return 'Americana Bola'
     
@@ -89,9 +89,13 @@ def classify_group(desc):
 @st.cache_data
 def load_data(uploaded_file):
     try:
-        try: df = pd.read_csv(uploaded_file, sep=',') 
-        except: df = pd.read_excel(uploaded_file)
-        if df.shape[1] < 2: df = pd.read_csv(uploaded_file, sep=';')
+        try: 
+            df = pd.read_csv(uploaded_file, sep=',') 
+        except: 
+            df = pd.read_excel(uploaded_file)
+            
+        if df.shape[1] < 2: 
+            df = pd.read_csv(uploaded_file, sep=';')
         
         df.columns = df.columns.str.strip()
         
@@ -104,5 +108,44 @@ def load_data(uploaded_file):
         }
         df = df.rename(columns=rename_map)
         
+        # Garante coluna Description
         if 'Description' not in df.columns: 
-            if len(df.columns) >= 4:
+            if len(df.columns) >= 4: 
+                # AQUI ESTAVA O ERRO DE INDENTAÇÃO
+                cols = ['Date','SKU','Description','Orders']
+                df.columns = cols + list(df.columns[4:])
+            else: 
+                df['Description'] = 'Prod ' + df['SKU'].astype(str)
+
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df = df.dropna(subset=['Date'])
+        df['Orders'] = pd.to_numeric(df['Orders'], errors='coerce').fillna(0)
+        df['Group'] = df['Description'].apply(classify_group)
+        
+        return df.groupby(['Date','SKU','Description','Group'])['Orders'].sum().reset_index()
+    except Exception as e:
+        st.error(f"Erro na leitura: {e}")
+        return pd.DataFrame()
+
+# --- 3. PRÉ-PROCESSAMENTO ---
+def filter_history_vero(df):
+    try:
+        mask_vero = df['Group'] == 'Vero'
+        mask_date = df['Date'] >= '2025-01-01'
+        return df[(mask_vero & mask_date) | (~mask_vero)].copy()
+    except:
+        return df
+
+def clean_outliers(df):
+    try:
+        df = df.sort_values(['SKU', 'Date'])
+        targets = ['Vero', 'Americana Bola']
+        skus = df[df['Group'].isin(targets)]['SKU'].unique()
+        
+        for sku in skus:
+            mask = df['SKU'] == sku
+            series = df.loc[mask, 'Orders']
+            if len(series) < 5: continue
+            
+            # Cálculo da mediana
+            median_val
