@@ -6,8 +6,8 @@ from datetime import timedelta
 import requests
 import holidays
 
-st.set_page_config(page_title="Forecasting Vero 2025+", layout="wide")
-st.title("📊 Previsão de Vendas (Foco Vero 2025+)")
+st.set_page_config(page_title="Forecasting Grupos + Feriados", layout="wide")
+st.title("📊 Previsão de Vendas (14 Dias) - Regras de Negócio Ajustadas")
 
 # --- 1. FUNÇÕES AUXILIARES ---
 def get_holidays_calendar(start_date, end_date):
@@ -26,7 +26,21 @@ def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
         return pd.DataFrame({'Date': dates, 'Temp_Avg': t_avg, 'Rain_mm': r['daily']['precipitation_sum']})
     except: return None
 
-# --- 2. CARGA DE DADOS ---
+# --- 2. CARGA E CATEGORIZAÇÃO (NOVA REGRA) ---
+def classify_group(desc):
+    desc = str(desc).lower()
+    
+    # PRIORIDADE 1: Americana Bola (Separa de tudo)
+    if 'americana bola' in desc: return 'Americana Bola'
+    
+    # Demais Grupos
+    if any(x in desc for x in ['vero', 'primavera', 'roxa']): return 'Vero'
+    if 'mini' in desc: return 'Minis'
+    if any(x in desc for x in ['legume', 'cenoura', 'beterraba', 'abobrinha', 'vagem', 'tomate']): return 'Legumes'
+    if any(x in desc for x in ['salada', 'alface', 'rúcula', 'agrião', 'espinafre', 'couve']): return 'Saladas'
+    
+    return 'Outros'
+
 @st.cache_data
 def load_data(uploaded_file):
     try: df = pd.read_csv(uploaded_file, sep=',') 
@@ -47,39 +61,28 @@ def load_data(uploaded_file):
     df = df.dropna(subset=['Date'])
     df['Orders'] = pd.to_numeric(df['Orders'], errors='coerce').fillna(0)
     
-    return df.groupby(['Date','SKU','Description'])['Orders'].sum().reset_index()
+    # Aplica Categorização Nova
+    df['Group'] = df['Description'].apply(classify_group)
+    
+    return df.groupby(['Date','SKU','Description','Group'])['Orders'].sum().reset_index()
 
-# --- 3. FILTRO DE HISTÓRICO VERO (NOVO) ---
+# --- 3. PRÉ-PROCESSAMENTO ---
 def filter_history_vero(df):
-    """
-    Remove dados antigos (antes de 2025) APENAS para a linha Vero/Primavera/Roxa.
-    Para os outros produtos, mantém o histórico completo.
-    """
-    # Identifica linhas Vero
-    vero_mask = df['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
-    
-    # Regra 1: Se for Vero, Data deve ser >= 2025
+    vero_mask = df['Group'] == 'Vero'
     keep_vero = vero_mask & (df['Date'] >= '2025-01-01')
-    
-    # Regra 2: Se NÃO for Vero, mantém tudo
     keep_others = ~vero_mask
-    
-    # Junta as duas partes
-    df_filtered = df[keep_vero | keep_others].copy()
-    
-    return df_filtered
+    return df[keep_vero | keep_others].copy()
 
 def clean_outliers(df):
-    # Limpeza suave de picos extremos para não confundir o treino
     df = df.sort_values(['SKU', 'Date'])
-    vero_mask = df['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
-    vero_skus = df[vero_mask]['SKU'].unique()
+    # Aplica limpeza no grupo Vero e também no Americana Bola se necessário
+    target_groups = ['Vero', 'Americana Bola']
+    target_skus = df[df['Group'].isin(target_groups)]['SKU'].unique()
     
-    for sku in vero_skus:
+    for sku in target_skus:
         mask = df['SKU'] == sku
         series = df.loc[mask, 'Orders']
         rolling_median = series.rolling(window=14, min_periods=1, center=True).median()
-        # Tolerância maior (4x) para aceitar picos de venda, mas cortar implantação absurda
         is_outlier = series > (rolling_median * 4) 
         if is_outlier.any():
             df.loc[mask & is_outlier, 'Orders'] = rolling_median[is_outlier]
@@ -88,10 +91,7 @@ def clean_outliers(df):
 
 # --- 4. MOTOR DE PREVISÃO ---
 def run_forecast(df_hist_raw, days_ahead=14):
-    # APLICAR O FILTRO DE DATA AQUI
     df_hist = filter_history_vero(df_hist_raw)
-    
-    # Limpeza de outliers
     df_hist = clean_outliers(df_hist)
     
     end_date_hist = df_hist['Date'].max()
@@ -118,14 +118,10 @@ def run_forecast(df_hist_raw, days_ahead=14):
     df_dates['IsHoliday'] = df_dates['IsHoliday'].fillna(0)
 
     # Merge Full
-    unique_skus = df_hist[['SKU', 'Description']].drop_duplicates()
+    unique_skus = df_hist[['SKU', 'Description', 'Group']].drop_duplicates()
     unique_skus['key'] = 1; df_dates['key'] = 1
     df_master = pd.merge(df_dates, unique_skus, on='key').drop('key', axis=1)
     df_master = pd.merge(df_master, df_hist[['Date','SKU','Orders']], on=['Date','SKU'], how='left')
-    
-    # Preenche zeros, mas com cuidado:
-    # Como cortamos 2022-2024 para Vero, esses dados vão aparecer como NaN no merge com df_dates antigos.
-    # Vamos preencher com 0, o que é correto (para o modelo, é como se o produto não existisse antes).
     df_master.loc[df_master['Date'] <= end_date_hist, 'Orders'] = df_master.loc[df_master['Date'] <= end_date_hist, 'Orders'].fillna(0)
 
     # Features
@@ -138,8 +134,6 @@ def run_forecast(df_hist_raw, days_ahead=14):
         return d
 
     df_feat = gen_feat(df_master)
-    # Importante: O dropna aqui vai remover 2022-2024 para Vero automaticamente, 
-    # pois geramos features baseadas na data. O treino será focado em 2025+.
     train = df_feat[df_feat['Date'] <= end_date_hist].dropna()
     
     # Treino (XGBoost)
@@ -154,7 +148,7 @@ def run_forecast(df_hist_raw, days_ahead=14):
     
     for i in range(1, days_ahead + 1):
         nxt = end_date_hist + timedelta(days=i)
-        nxt_base = df_master[df_master['Date'] == nxt][['Date','SKU','Description','Temp_Avg','Rain_mm','IsHoliday']].copy()
+        nxt_base = df_master[df_master['Date'] == nxt][['Date','SKU','Description','Group','Temp_Avg','Rain_mm','IsHoliday']].copy()
         
         tmp = pd.concat([curr, nxt_base], sort=False)
         tmp = gen_feat(tmp)
@@ -163,6 +157,14 @@ def run_forecast(df_hist_raw, days_ahead=14):
         y = np.maximum(model.predict(row[feat_cols].fillna(0)), 0)
         row['Orders'] = y.round(0)
         
+        # --- TRAVA DE NEGÓCIO: ZERAR DOMINGO E FERIADO ---
+        # Se for Domingo (6) OU se for Feriado (IsHoliday == 1)
+        is_holiday_flag = row['IsHoliday'].values[0] == 1
+        is_sunday = nxt.dayofweek == 6
+        
+        if is_sunday or is_holiday_flag:
+            row['Orders'] = 0
+            
         preds.append(row)
         curr = pd.concat([curr, row], sort=False)
         prog.progress(i/days_ahead)
@@ -176,51 +178,58 @@ if uploaded_file:
     df_raw = load_data(uploaded_file)
     if not df_raw.empty:
         today = df_raw['Date'].max()
-        st.info(f"Dados até: **{today.date()}** | Vero considerada a partir de: **01/01/2025**")
+        st.info(f"Dados até: **{today.date()}**")
         
         if st.button("🚀 Gerar Previsão 14 Dias"):
             forecast, history = run_forecast(df_raw, days_ahead=14)
             
-            # --- PIVOT PARA CSV FINAL (Formato Matriz) ---
-            df_pivot = forecast.pivot_table(index=['SKU', 'Description'], 
-                                          columns='Date', 
-                                          values='Orders', 
-                                          aggfunc='sum').reset_index()
-            
-            new_cols = []
-            for c in df_pivot.columns:
-                if isinstance(c, pd.Timestamp):
-                    new_cols.append(c.strftime('%d/%m'))
-                else:
-                    new_cols.append(c)
-            df_pivot.columns = new_cols
-
-            # --- MÉTRICAS ---
-            f_curr = forecast['Orders'].sum()
-            
-            # Comparativo
+            # --- DATAS DE COMPARAÇÃO ---
             fut_start = today + timedelta(days=1)
             fut_end = today + timedelta(days=14)
             
             ly_start = fut_start - timedelta(weeks=52)
             ly_end = fut_end - timedelta(weeks=52)
-            f_ly = history[(history['Date'] >= ly_start) & (history['Date'] <= ly_end)]['Orders'].sum()
-
+            
             l2y_start = fut_start - timedelta(weeks=104)
             l2y_end = fut_end - timedelta(weeks=104)
-            f_2y = history[(history['Date'] >= l2y_start) & (history['Date'] <= l2y_end)]['Orders'].sum()
 
+            # --- ANÁLISE POR GRUPO ---
+            # Adicionado "Americana Bola" na lista de exibição
+            groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis', 'Outros']
+            summary_data = []
+
+            for g in groups:
+                # Previsão Atual
+                f_curr = forecast[forecast['Group'] == g]['Orders'].sum()
+                
+                # Ano Passado
+                hist_ly = history[(history['Date'] >= ly_start) & (history['Date'] <= ly_end)]
+                f_ly = hist_ly[hist_ly['Group'] == g]['Orders'].sum()
+                
+                # 2 Anos Atrás
+                hist_2y = history[(history['Date'] >= l2y_start) & (history['Date'] <= l2y_end)]
+                f_2y = hist_2y[hist_2y['Group'] == g]['Orders'].sum()
+                
+                # Variação
+                var_ly = ((f_curr / f_ly) - 1) * 100 if f_ly > 0 else 0
+                var_2y = ((f_curr / f_2y) - 1) * 100 if f_2y > 0 else 0
+                
+                summary_data.append({
+                    'Grupo': g,
+                    'Previsão (14d)': int(f_curr),
+                    'Realizado 2025': int(f_ly),
+                    'Var % (vs 25)': f"{var_ly:+.1f}%",
+                    'Realizado 2024': int(f_2y),
+                    'Var % (vs 24)': f"{var_2y:+.1f}%"
+                })
+
+            df_summary = pd.DataFrame(summary_data)
+            
+            # --- EXIBIÇÃO ---
             st.divider()
-            st.subheader("📊 Resumo de Performance")
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Previsão Total (14 Dias)", f"{int(f_curr):,}")
-            col2.metric("vs Ano Passado (2025)", f"{((f_curr/f_ly)-1)*100:.1f}%" if f_ly else "N/D")
-            col3.metric("vs 2 Anos Atrás (2024)", f"{((f_curr/f_2y)-1)*100:.1f}%" if f_2y else "N/D")
-            
-            st.write("---")
-            st.write("### 🗓️ Previsão Detalhada")
-            st.dataframe(df_pivot)
-            
-            csv = df_pivot.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar Planilha Detalhada", csv, "previsao_vero_2025plus.csv", "text/csv")
+            st.subheader("📊 Comparativo de Performance por Grupo")
+            st.dataframe(df_summary, hide_index=True, use_container_width=True)
+            st.caption(f"*Venda ZERO aplicada para Domingos e Feriados previstos.")
+
+            # --- CSV FINAL (MATRIZ) ---
+            df_pivot = forecast.pivot_table(index=['
