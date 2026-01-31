@@ -7,9 +7,7 @@ import requests
 import holidays
 import traceback
 import re
-from pandasai import SmartDataframe
-from pandasai.llm import GoogleGemini
-import matplotlib.pyplot as plt # Garante que gráficos funcionem
+import google.generativeai as genai
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Forecasting Final", layout="wide")
@@ -81,7 +79,7 @@ def classify_group(desc):
             weight = int(match.group(1))
             if weight > 100: return 'Saladas'
     
-    # 5. Legumes (Incluindo Grão-de-Bico com hífen)
+    # 5. Legumes
     legumes_keys = [
         'legume', 'cenoura', 'beterraba', 'abobrinha',
         'batata', 'mandioca', 'mandioquinha', 'sopa',
@@ -90,7 +88,7 @@ def classify_group(desc):
     ]
     if any(x in txt for x in legumes_keys): return 'Legumes'
     
-    # 6. Saladas (Resto)
+    # 6. Saladas
     saladas_keys = ['salada', 'alface', 'rúcula', 'rucula', 'agrião', 'agriao', 'insalata']
     if any(x in txt for x in saladas_keys): return 'Saladas'
     
@@ -167,6 +165,7 @@ def generate_features(df):
     d['lag_14'] = d.groupby('SKU')['Orders'].shift(14)
     d['roll_7'] = d.groupby('SKU')['Orders'].shift(1).rolling(7).mean()
     return d
+
 # --- 4. MOTOR DE PREVISÃO ---
 
 def run_forecast(df_raw, days_ahead=14):
@@ -247,7 +246,6 @@ def run_forecast(df_raw, days_ahead=14):
         progress_bar.progress(i / days_ahead)
         
     return pd.concat(preds)
-
 # --- 5. INTERFACE DO USUÁRIO ---
 
 uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
@@ -276,7 +274,6 @@ if uploaded_file:
                         hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
                         hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
                         
-                        # Lista de grupos sem "Outros"
                         groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis']
                         summary = []
                         
@@ -297,7 +294,6 @@ if uploaded_file:
                                 'Var % (24)': f"{p_2y:+.1f}%"
                             })
                             
-                        # Total Geral
                         tot_cur = forecast['Orders'].sum()
                         tot_ly = hist_ly['Orders'].sum()
                         tot_2y = hist_2y['Orders'].sum()
@@ -319,7 +315,6 @@ if uploaded_file:
                         df_summary = pd.DataFrame(summary)
                         st.dataframe(df_summary, hide_index=True, use_container_width=True)
                         
-                        # Detalhada
                         df_piv = forecast.pivot_table(
                             index=['SKU', 'Description', 'Group'], 
                             columns='Date', 
@@ -327,7 +322,6 @@ if uploaded_file:
                             aggfunc='sum'
                         ).reset_index()
                         
-                        # Total Geral na Detalhada
                         num_cols = df_piv.select_dtypes(include=[np.number]).columns
                         total_row = df_piv[num_cols].sum()
                         total_row['SKU'] = 'TOTAL'
@@ -349,109 +343,57 @@ if uploaded_file:
                         
                         csv = df_piv.to_csv(index=False).encode('utf-8')
                         st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
+
+                        # --- IA GEMINI (CONEXÃO DIRETA) ---
+                        st.divider()
+                        st.subheader("🤖 Analista IA")
+                        
+                        api_key = st.text_input("Insira sua Gemini API Key:", type="password")
+                        
+                        if api_key:
+                            try:
+                                genai.configure(api_key=api_key)
+                                model = genai.GenerativeModel('gemini-1.5-flash')
+                                
+                                # Prepara contexto leve
+                                df_hist_recent = df_raw[df_raw['Date'] >= (max_date - timedelta(days=90))].copy()
+                                df_hist_recent['Tipo'] = 'Histórico (Últimos 90 dias)'
+                                
+                                df_fore_ia = forecast.copy()
+                                df_fore_ia['Tipo'] = 'Previsão (Próx. 14 dias)'
+                                
+                                # Resumos para o Prompt
+                                resumo_grupo = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_markdown()
+                                
+                                top_sku_prev = df_fore_ia.groupby('Description')['Orders'].sum().nlargest(5).to_markdown()
+                                
+                                st.info("Pergunte algo como: 'Qual a tendência de crescimento do grupo Vero?' ou 'Quais os 3 produtos mais vendidos na previsão?'")
+                                query = st.text_area("Pergunta:")
+                                
+                                if st.button("Consultar IA"):
+                                    with st.spinner("Analisando..."):
+                                        prompt = f"""
+                                        Você é um analista sênior de planejamento de demanda.
+                                        Analise estes dados resumidos:
+                                        
+                                        1. Vendas por Grupo (Histórico Recente vs Previsão):
+                                        {resumo_grupo}
+                                        
+                                        2. Top 5 Produtos na Previsão (Volume):
+                                        {top_sku_prev}
+                                        
+                                        Total Geral Previsto: {int(tot_cur)} unidades.
+                                        
+                                        Pergunta do usuário: {query}
+                                        
+                                        Responda de forma direta e em português.
+                                        """
+                                        response = model.generate_content(prompt)
+                                        st.markdown(response.text)
+                                        
+                            except Exception as e:
+                                st.error(f"Erro na conexão com IA: {e}")
                         
                 except Exception as e:
                     st.error(f"Erro na execução: {e}")
                     st.write(traceback.format_exc())
-# ... (Todo o código anterior da tabela detalhada e download button) ...
-
-                    st.divider()
-                    st.subheader("🤖 Analista IA (Gemini)")
-                    
-                    # Campo para a API Key (para não deixar chumbada no código por segurança)
-                    api_key = st.text_input("Cole sua Google Gemini API Key:", type="password")
-                    
-                    if api_key:
-                        try:
-                            # 1. Configura o LLM
-                            llm = GoogleGemini(api_key=api_key)
-                            
-                            # 2. Prepara os dados para a IA
-                            # Vamos dar para a IA tanto o histórico quanto a previsão juntos
-                            # Para ela ter a visão completa (Passado + Futuro)
-                            
-                            # Pega histórico recente (ex: 2024 e 2025) para não ficar pesado demais
-                            df_history_clean = history[history['Date'] >= '2024-01-01'][['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
-                            df_forecast_clean = forecast[['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
-                            
-                            # Junta tudo num "Dataframe Mestre"
-                            df_ai = pd.concat([df_history_clean, df_forecast_clean])
-                            df_ai['Date'] = df_ai['Date'].dt.date # Simplifica data
-                            
-                            # 3. Cria o Cérebro (SmartDataframe)
-                            sdf = SmartDataframe(
-                                df_ai, 
-                                config={
-                                    "llm": llm,
-                                    "custom_whitelisted_dependencies": ["matplotlib", "seaborn"],
-                                    "save_charts": False, # Exibe direto no Streamlit
-                                    "open_charts": False,
-                                }
-                            )
-                            
-                            # 4. Interface de Chat
-                            st.info("💡 Exemplo: 'Qual SKU do grupo Vero vendeu mais em Janeiro de 2025?' ou 'Faça um gráfico de barras das vendas por Grupo na previsão.'")
-                            
-                            query = st.text_area("Pergunte algo sobre os dados:")
-                            
-                            if st.button("Perguntar à IA"):
-                                with st.spinner("A IA está analisando os dados..."):
-                                    resposta = sdf.chat(query)
-                                    
-                                    # Se a resposta for um caminho de imagem (gráfico gerado)
-                                    if isinstance(resposta, str) and ".png" in resposta:
-                                        st.image(resposta)
-                                    # Se for um dataframe
-                                    elif isinstance(resposta, pd.DataFrame):
-                                        st.dataframe(resposta)
-                                    # Se for texto/número
-                                    else:
-                                        st.write(resposta)
-                                        
-                        except Exception as e:
-                            st.error(f"Erro na IA: {e}")
-# ... (código anterior mantido) ...
-
-                    st.divider()
-                    st.subheader("🤖 Analista IA (Gemini)")
-                    
-                    api_key = st.text_input("Cole sua Google Gemini API Key:", type="password")
-                    
-                    if api_key:
-                        try:
-                            # Configuração Específica para PandasAI 1.5.5
-                            llm = GoogleGemini(api_key=api_key)
-                            
-                            # Prepara dados (Histórico + Previsão)
-                            df_history_clean = history[history['Date'] >= '2024-01-01'][['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
-                            df_forecast_clean = forecast[['Date', 'SKU', 'Description', 'Group', 'Orders']].copy()
-                            df_ai = pd.concat([df_history_clean, df_forecast_clean])
-                            df_ai['Date'] = df_ai['Date'].astype(str) # PandasAI 1.5 prefere data como texto
-                            
-                            # Cria o SmartDataframe (Sintaxe 1.5.5)
-                            sdf = SmartDataframe(
-                                df_ai, 
-                                config={"llm": llm}
-                            )
-                            
-                            st.info("💡 Ex: 'Qual SKU vendeu mais?' ou 'Faça um gráfico de barras por Grupo'")
-                            query = st.text_area("Pergunte aos dados:")
-                            
-                            if st.button("Perguntar à IA"):
-                                with st.spinner("Analisando..."):
-                                    # Na versão 1.5 o método é chat() direto
-                                    resposta = sdf.chat(query)
-                                    
-                                    # O PandasAI 1.5 às vezes retorna o caminho da imagem, às vezes o plot
-                                    if isinstance(resposta, str) and ".png" in resposta:
-                                        try:
-                                            st.image(resposta)
-                                        except:
-                                            st.write(resposta)
-                                    elif isinstance(resposta, pd.DataFrame):
-                                        st.dataframe(resposta)
-                                    else:
-                                        st.write(resposta)
-                                        
-                        except Exception as e:
-                            st.error(f"Erro: {e}")
