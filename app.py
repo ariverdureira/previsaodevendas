@@ -261,7 +261,7 @@ st.markdown("""
 c1, c2, c3 = st.columns([1, 2, 1])
 with c2:
     try:
-        st.image("AF-VERDUREIRA-LOGO-HORIZONTAL-07.png", use_container_width=True)
+        st.image("AF-VERDUREIRA-LOGO-HORIZONTAL-07.jpg", use_container_width=True)
     except:
         st.warning("⚠️ Logo não encontrada.")
 
