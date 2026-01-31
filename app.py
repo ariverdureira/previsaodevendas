@@ -295,10 +295,10 @@ if uploaded_file:
                 summary.append({
                     'Grupo': g,
                     'Previsão 14d': int(v_curr),
-                    '2025': int(v_ly),
-                    'Var % (25)': f"{p_ly:+.1f}%",
-                    '2024': int(v_2y),
-                    'Var % (24)': f"{p_2y:+.1f}%"
+                    '2025 (Mesmo Período)': int(v_ly),
+                    'Var % (vs 25)': f"{p_ly:+.1f}%",
+                    '2024 (Mesmo Período)': int(v_2y),
+                    'Var % (vs 24)': f"{p_2y:+.1f}%"
                 })
             
             tot_cur = forecast['Orders'].sum()
@@ -311,10 +311,10 @@ if uploaded_file:
             summary.append({
                 'Grupo': 'TOTAL GERAL',
                 'Previsão 14d': int(tot_cur),
-                '2025': int(tot_ly),
-                'Var % (25)': f"{pt_ly:+.1f}%",
-                '2024': int(tot_2y),
-                'Var % (24)': f"{pt_2y:+.1f}%"
+                '2025 (Mesmo Período)': int(tot_ly),
+                'Var % (vs 25)': f"{pt_ly:+.1f}%",
+                '2024 (Mesmo Período)': int(tot_2y),
+                'Var % (vs 24)': f"{pt_2y:+.1f}%"
             })
             
             st.divider()
@@ -352,7 +352,7 @@ if uploaded_file:
             csv = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
 
-            # --- IA GEMINI (COM AUTO-DESCOBERTA DE MODELO) ---
+            # --- IA GEMINI (AGORA COM DADOS ANUAIS) ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -362,8 +362,7 @@ if uploaded_file:
                 try:
                     genai.configure(api_key=api_key)
                     
-                    # --- LÓGICA DE AUTO-DESCOBERTA ---
-                    # Lista os modelos que sua chave tem acesso
+                    # Auto-Descoberta de Modelo
                     available_models = []
                     try:
                         for m in genai.list_models():
@@ -371,14 +370,8 @@ if uploaded_file:
                                 available_models.append(m.name)
                     except: pass
 
-                    # Tenta escolher o melhor automaticamente
-                    model_name = 'gemini-1.5-flash' # Preferido
-                    
-                    if not available_models:
-                        # Se não conseguiu listar, tenta o padrãozão
-                        model_name = 'gemini-1.5-flash'
-                    else:
-                        # Procura Flash ou Pro na lista
+                    model_name = 'gemini-1.5-flash'
+                    if available_models:
                         if any('flash' in m for m in available_models):
                             model_name = next(m for m in available_models if 'flash' in m)
                         elif any('pro' in m for m in available_models):
@@ -387,39 +380,48 @@ if uploaded_file:
                             model_name = available_models[0]
                     
                     model = genai.GenerativeModel(model_name)
-                    # ----------------------------------
                     
-                    df_hist_recent = df_raw[df_raw['Date'] >= (max_date - timedelta(days=90))].copy()
-                    df_hist_recent['Tipo'] = 'Histórico (90d)'
+                    # PREPARANDO O CONTEXTO PARA A IA
                     
+                    # 1. Tabela Executiva (Com variação Anual)
+                    # Convertemos a tabela df_summary que já calculamos acima para texto
+                    tabela_anual_str = df_summary.to_string(index=False)
+
+                    # 2. Histórico Recente (Para contexto de curto prazo)
+                    df_hist_recent = df_raw[df_raw['Date'] >= (max_date - timedelta(days=60))].copy()
+                    df_hist_recent['Tipo'] = 'Histórico (60d)'
                     df_fore_ia = forecast.copy()
                     df_fore_ia['Tipo'] = 'Previsão (14d)'
                     
-                    # Usando .to_string() para evitar erros de biblioteca
-                    resumo_grupo = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_string()
+                    resumo_recente = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_string()
                     top_sku = df_fore_ia.groupby('Description')['Orders'].sum().nlargest(5).to_string()
                     
-                    st.info(f"Modelo Conectado: {model_name}. \nPergunte algo como: 'Por que o grupo Vero está variando?'")
+                    st.info(f"Modelo: {model_name}. \nAgora a IA tem acesso aos dados de variação anual (2024/2025).")
                     query = st.text_area("Pergunta:", key="gemini_query")
                     
                     if st.button("Consultar IA"):
                         with st.spinner("Analisando..."):
                             prompt = f"""
-                            Você é um analista de demanda.
-                            Dados:
-                            1. Vendas por Grupo:
-                            {resumo_grupo}
+                            Você é um analista sênior de planejamento de demanda.
                             
-                            2. Top 5 Produtos Previstos:
+                            Use as tabelas abaixo para responder à pergunta do usuário.
+                            
+                            TABELA 1: RESUMO EXECUTIVO (COMPARATIVO ANUAL)
+                            (Use esta tabela para falar sobre crescimento ou queda em relação a 2024 e 2025)
+                            {tabela_anual_str}
+                            
+                            TABELA 2: TENDÊNCIA RECENTE (CURTO PRAZO)
+                            {resumo_recente}
+                            
+                            TABELA 3: TOP 5 PRODUTOS PREVISTOS
                             {top_sku}
                             
-                            Total Previsto: {int(tot_cur)}
+                            Pergunta do usuário: {query}
                             
-                            Pergunta: {query}
+                            Responda em português, citando as porcentagens de variação quando relevante.
                             """
                             response = model.generate_content(prompt)
                             st.markdown(response.text)
                             
                 except Exception as e:
                     st.error(f"Erro Conexão IA: {e}")
-                    st.warning("Dica: Verifique se sua API Key é válida no Google AI Studio.")
