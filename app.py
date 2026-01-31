@@ -7,7 +7,7 @@ import requests
 import holidays
 
 st.set_page_config(page_title="Forecasting Grupos + Feriados", layout="wide")
-st.title("📊 Previsão de Vendas (14 Dias) - Regras de Negócio Ajustadas")
+st.title("📊 Previsão de Vendas (14 Dias) - Regras Ajustadas")
 
 # --- 1. FUNÇÕES AUXILIARES ---
 def get_holidays_calendar(start_date, end_date):
@@ -18,15 +18,21 @@ def get_holidays_calendar(start_date, end_date):
 def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
     try:
         url = "https://api.open-meteo.com/v1/forecast"
-        params = {"latitude": lat, "longitude": lon, "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"],
-                  "timezone": "America/Sao_Paulo", "forecast_days": days + 2}
+        params = {
+            "latitude": lat, 
+            "longitude": lon, 
+            "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_sum"],
+            "timezone": "America/Sao_Paulo", 
+            "forecast_days": days + 2
+        }
         r = requests.get(url, params=params).json()
         dates = pd.to_datetime(r['daily']['time'])
         t_avg = (np.array(r['daily']['temperature_2m_max']) + np.array(r['daily']['temperature_2m_min'])) / 2
         return pd.DataFrame({'Date': dates, 'Temp_Avg': t_avg, 'Rain_mm': r['daily']['precipitation_sum']})
-    except: return None
+    except: 
+        return None
 
-# --- 2. CARGA E CATEGORIZAÇÃO (NOVA REGRA) ---
+# --- 2. CARGA E CATEGORIZAÇÃO ---
 def classify_group(desc):
     desc = str(desc).lower()
     
@@ -54,8 +60,10 @@ def load_data(uploaded_file):
     df = df.rename(columns=rename)
     
     if 'Description' not in df.columns: 
-        if len(df.columns) >= 4: df.columns = ['Date','SKU','Description','Orders'] + list(df.columns[4:])
-        else: df['Description'] = 'Prod ' + df['SKU'].astype(str)
+        if len(df.columns) >= 4: 
+            df.columns = ['Date','SKU','Description','Orders'] + list(df.columns[4:])
+        else: 
+            df['Description'] = 'Prod ' + df['SKU'].astype(str)
 
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     df = df.dropna(subset=['Date'])
@@ -75,7 +83,7 @@ def filter_history_vero(df):
 
 def clean_outliers(df):
     df = df.sort_values(['SKU', 'Date'])
-    # Aplica limpeza no grupo Vero e também no Americana Bola se necessário
+    # Aplica limpeza no grupo Vero e também no Americana Bola
     target_groups = ['Vero', 'Americana Bola']
     target_skus = df[df['Group'].isin(target_groups)]['SKU'].unique()
     
@@ -105,6 +113,7 @@ def run_forecast(df_hist_raw, days_ahead=14):
     np.random.seed(42)
     df_dates['Temp_Avg'] = np.random.normal(25, 3, len(df_dates))
     df_dates['Rain_mm'] = np.where(df_dates['Date'].dt.month.isin([1,2,3,12]), np.random.exponential(8, len(df_dates)), 4)
+    
     if real_forecast is not None:
         real_forecast['Date'] = pd.to_datetime(real_forecast['Date'])
         df_dates = pd.merge(df_dates, real_forecast, on='Date', how='left', suffixes=('', '_real'))
@@ -122,4 +131,5 @@ def run_forecast(df_hist_raw, days_ahead=14):
     unique_skus['key'] = 1; df_dates['key'] = 1
     df_master = pd.merge(df_dates, unique_skus, on='key').drop('key', axis=1)
     df_master = pd.merge(df_master, df_hist[['Date','SKU','Orders']], on=['Date','SKU'], how='left')
-    df_master.loc[df_master['Date'] <= end_date_hist, 'Orders'] = df_master.loc[df_
+    
+    #
