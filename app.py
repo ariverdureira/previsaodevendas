@@ -52,7 +52,7 @@ def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
     except: 
         return None
 
-# --- 2. CLASSIFICAÇÃO DE GRUPOS (ATUALIZADA) ---
+# --- 2. CLASSIFICAÇÃO DE GRUPOS ---
 
 def classify_group(desc):
     if not isinstance(desc, str): return 'Outros'
@@ -61,8 +61,7 @@ def classify_group(desc):
     # 1. Prioridade Absoluta: Americana Bola
     if 'americana bola' in txt: return 'Americana Bola'
     
-    # 2. Grupo Vero (Atualizado com Mix, Repolho, Couve, Rucula HG)
-    # Nota: 'rucula hg' entra aqui para não cair em Saladas genérico
+    # 2. Grupo Vero
     vero_keys = [
         'vero', 'primavera', 'roxa', 
         'mix', 'repolho', 'couve', 'rucula hg'
@@ -79,12 +78,12 @@ def classify_group(desc):
             weight = int(match.group(1))
             if weight > 100: return 'Saladas'
     
-    # 5. Legumes (Expandido com Batata, Mandioca, Sopa, Grãos, Milho...)
+    # 5. Legumes (Incluindo Grão-de-Bico com hífen)
     legumes_keys = [
         'legume', 'cenoura', 'beterraba', 'abobrinha',
         'batata', 'mandioca', 'mandioquinha', 'sopa',
-        'grao de bico', 'grão de bico', 'lentilha',
-        'pinhao', 'pinhão', 'quinoa', 'milho'
+        'grao de bico', 'grão de bico', 'grao-de-bico', 'grão-de-bico',
+        'lentilha', 'pinhao', 'pinhão', 'quinoa', 'milho'
     ]
     if any(x in txt for x in legumes_keys): return 'Legumes'
     
@@ -257,15 +256,6 @@ if uploaded_file:
         max_date = df_raw['Date'].max()
         st.info(f"Dados até: **{max_date.date()}**")
         
-        # --- AUDITORIA DE "OUTROS" ---
-        with st.expander("🕵️ Ver produtos classificados como 'Outros'"):
-            df_outros = df_raw[df_raw['Group'] == 'Outros'][['SKU', 'Description']].drop_duplicates()
-            if not df_outros.empty:
-                st.write(f"Existem **{len(df_outros)}** produtos sem grupo definido:")
-                st.dataframe(df_outros.sort_values('Description'), hide_index=True)
-            else:
-                st.success("Todos os produtos foram classificados corretamente!")
-        
         if st.button("🚀 Gerar Previsão"):
             with st.spinner("Processando..."):
                 try:
@@ -283,7 +273,8 @@ if uploaded_file:
                         hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
                         hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
                         
-                        groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis', 'Outros']
+                        # Lista de grupos sem "Outros"
+                        groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis']
                         summary = []
                         
                         for g in groups:
@@ -303,6 +294,7 @@ if uploaded_file:
                                 'Var % (24)': f"{p_2y:+.1f}%"
                             })
                             
+                        # Total Geral
                         tot_cur = forecast['Orders'].sum()
                         tot_ly = hist_ly['Orders'].sum()
                         tot_2y = hist_2y['Orders'].sum()
@@ -324,6 +316,7 @@ if uploaded_file:
                         df_summary = pd.DataFrame(summary)
                         st.dataframe(df_summary, hide_index=True, use_container_width=True)
                         
+                        # Detalhada
                         df_piv = forecast.pivot_table(
                             index=['SKU', 'Description', 'Group'], 
                             columns='Date', 
@@ -331,6 +324,7 @@ if uploaded_file:
                             aggfunc='sum'
                         ).reset_index()
                         
+                        # Total Geral na Detalhada
                         num_cols = df_piv.select_dtypes(include=[np.number]).columns
                         total_row = df_piv[num_cols].sum()
                         total_row['SKU'] = 'TOTAL'
