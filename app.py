@@ -52,27 +52,45 @@ def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
     except: 
         return None
 
-# --- 2. CLASSIFICAÇÃO DE GRUPOS ---
+# --- 2. CLASSIFICAÇÃO DE GRUPOS (ATUALIZADA) ---
 
 def classify_group(desc):
     if not isinstance(desc, str): return 'Outros'
     txt = desc.lower()
     
+    # 1. Prioridade Absoluta: Americana Bola
     if 'americana bola' in txt: return 'Americana Bola'
-    if any(x in txt for x in ['vero', 'primavera', 'roxa']): return 'Vero'
+    
+    # 2. Grupo Vero (Atualizado com Mix, Repolho, Couve, Rucula HG)
+    # Nota: 'rucula hg' entra aqui para não cair em Saladas genérico
+    vero_keys = [
+        'vero', 'primavera', 'roxa', 
+        'mix', 'repolho', 'couve', 'rucula hg'
+    ]
+    if any(x in txt for x in vero_keys): return 'Vero'
+    
+    # 3. Minis
     if 'mini' in txt: return 'Minis'
     
+    # 4. Regra Insalata > 100g
     if 'insalata' in txt:
         match = re.search(r'(\d+)\s*g', txt)
         if match:
             weight = int(match.group(1))
             if weight > 100: return 'Saladas'
     
-    legumes = ['legume', 'cenoura', 'beterraba', 'abobrinha']
-    if any(x in txt for x in legumes): return 'Legumes'
+    # 5. Legumes (Expandido com Batata, Mandioca, Sopa, Grãos, Milho...)
+    legumes_keys = [
+        'legume', 'cenoura', 'beterraba', 'abobrinha',
+        'batata', 'mandioca', 'mandioquinha', 'sopa',
+        'grao de bico', 'grão de bico', 'lentilha',
+        'pinhao', 'pinhão', 'quinoa', 'milho'
+    ]
+    if any(x in txt for x in legumes_keys): return 'Legumes'
     
-    saladas = ['salada', 'alface', 'rúcula', 'agrião', 'insalata']
-    if any(x in txt for x in saladas): return 'Saladas'
+    # 6. Saladas (Resto)
+    saladas_keys = ['salada', 'alface', 'rúcula', 'rucula', 'agrião', 'agriao', 'insalata']
+    if any(x in txt for x in saladas_keys): return 'Saladas'
     
     return 'Outros'
 
@@ -238,6 +256,15 @@ if uploaded_file:
     if not df_raw.empty:
         max_date = df_raw['Date'].max()
         st.info(f"Dados até: **{max_date.date()}**")
+        
+        # --- AUDITORIA DE "OUTROS" ---
+        with st.expander("🕵️ Ver produtos classificados como 'Outros'"):
+            df_outros = df_raw[df_raw['Group'] == 'Outros'][['SKU', 'Description']].drop_duplicates()
+            if not df_outros.empty:
+                st.write(f"Existem **{len(df_outros)}** produtos sem grupo definido:")
+                st.dataframe(df_outros.sort_values('Description'), hide_index=True)
+            else:
+                st.success("Todos os produtos foram classificados corretamente!")
         
         if st.button("🚀 Gerar Previsão"):
             with st.spinner("Processando..."):
