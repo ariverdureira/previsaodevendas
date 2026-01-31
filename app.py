@@ -239,6 +239,40 @@ def run_forecast(df_raw, days_ahead=14):
     return pd.concat(preds)
 # --- 5. INTERFACE DO USUÁRIO ---
 
+# Configuração de estilo para centralizar título e ajustar cores
+st.markdown("""
+    <style>
+        .title-text {
+            text-align: center;
+            color: #8CFF00; /* Verde Neon similar ao da marca */
+            font-family: sans-serif;
+            font-weight: bold;
+            font-size: 3rem;
+            margin-bottom: 2rem;
+        }
+        .stAppHeader {
+            background-color: transparent;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- CABEÇALHO COM LOGO ---
+# Cria 3 colunas para centralizar a imagem na coluna do meio
+c1, c2, c3 = st.columns([1, 2, 1])
+
+with c2:
+    try:
+        # Tenta carregar a logo. Ajuste o 'width' se ficar muito grande ou pequeno.
+        st.image("AF-VERDUREIRA-LOGO-HORIZONTAL-07.png", use_container_width=True)
+    except:
+        # Fallback caso a imagem não esteja na pasta
+        st.warning("⚠️ Imagem 'AF-VERDUREIRA-LOGO-HORIZONTAL-07.png' não encontrada na pasta.")
+
+# Título Customizado Centralizado
+st.markdown('<h1 class="title-text">PCP - Previsão de Vendas</h1>', unsafe_allow_html=True)
+
+# --- INÍCIO DA LÓGICA DO APP ---
+
 uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
 
 # Limpa memória se trocar de arquivo
@@ -252,10 +286,14 @@ if uploaded_file:
     
     if not df_raw.empty:
         max_date = df_raw['Date'].max()
-        st.info(f"Dados até: **{max_date.date()}**")
+        # st.info removido para limpar o visual, já que o título domina
         
-        # Botão para processar
-        if st.button("🚀 Gerar Previsão"):
+        # Botão para processar (Centralizado também para combinar)
+        col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+        with col_btn2:
+            processar = st.button("🚀 Gerar Previsão", use_container_width=True)
+
+        if processar:
             with st.spinner("Calculando previsão..."):
                 try:
                     forecast_result = run_forecast(df_raw, days_ahead=14)
@@ -352,7 +390,7 @@ if uploaded_file:
             csv = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
 
-            # --- IA GEMINI (CORRIGIDO: CÁLCULO DE MÉDIA DIÁRIA) ---
+            # --- IA GEMINI (COM CONTEXTO MELHORADO) ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -381,43 +419,33 @@ if uploaded_file:
                     
                     model = genai.GenerativeModel(model_name)
                     
-                    # --- PREPARANDO DADOS CORRETAMENTE ---
+                    # --- PREPARANDO DADOS ---
                     
-                    # 1. Tabela Executiva (Comparativo Anual)
+                    # 1. Comparativo Anual
                     tabela_anual_str = df_summary.to_string(index=False)
 
-                    # 2. Tabela de Ritmo (Média Diária) - AQUI ESTAVA O ERRO
-                    # Vamos calcular a venda MÉDIA por dia dos últimos 60 dias vs próximos 14 dias
-                    
-                    # Dados Históricos (60 dias)
+                    # 2. Ritmo de Vendas (Média Diária)
                     dt_cut = max_date - timedelta(days=60)
                     df_h_recent = df_raw[df_raw['Date'] > dt_cut]
                     days_hist = (df_h_recent['Date'].max() - df_h_recent['Date'].min()).days + 1
-                    days_hist = max(days_hist, 1) # Evita divisão por zero
+                    days_hist = max(days_hist, 1)
                     
-                    # Agrupa e divide pelos dias
                     media_hist = df_h_recent.groupby('Group')['Orders'].sum() / days_hist
-                    
-                    # Dados Previsão (14 dias)
                     days_fore = 14
                     media_fore = forecast.groupby('Group')['Orders'].sum() / days_fore
                     
-                    # Cria DataFrame de Comparação de Ritmo
                     df_ritmo = pd.DataFrame({
                         'Média Diária (Últimos 60d)': media_hist,
                         'Média Diária (Prevista 14d)': media_fore
                     })
                     
-                    # Calcula Variação de Ritmo
                     df_ritmo['Aceleração de Vendas (%)'] = ((df_ritmo['Média Diária (Prevista 14d)'] / df_ritmo['Média Diária (Últimos 60d)']) - 1) * 100
-                    
-                    # Formata para string
                     tabela_ritmo_str = df_ritmo.round(1).to_string()
                     
                     # 3. Top Produtos
                     top_sku = forecast.groupby('Description')['Orders'].sum().nlargest(5).to_string()
                     
-                    st.info(f"Modelo: {model_name}. IA ajustada para comparar médias diárias (ritmo de vendas).")
+                    st.info(f"Modelo: {model_name}. Dados carregados: Comparativo Anual + Ritmo Diário.")
                     query = st.text_area("Pergunta:", key="gemini_query")
                     
                     if st.button("Consultar IA"):
@@ -425,22 +453,19 @@ if uploaded_file:
                             prompt = f"""
                             Você é um analista sênior de planejamento de demanda.
                             
-                            Analise os dados abaixo com precisão.
-                            
                             TABELA 1: COMPARATIVO ANUAL (Volume Total)
-                            Compare o volume previsto com os anos anteriores (2024 e 2025).
                             {tabela_anual_str}
                             
                             TABELA 2: RITMO DE VENDAS (Média Diária)
-                            Esta tabela mostra se o ritmo diário de vendas está acelerando ou desacelerando em relação aos últimos 2 meses.
+                            Mostra se a venda diária está acelerando ou freando vs últimos 2 meses.
                             {tabela_ritmo_str}
                             
                             TABELA 3: TOP PRODUTOS
                             {top_sku}
                             
-                            Pergunta do usuário: {query}
+                            Pergunta: {query}
                             
-                            Responda em português. Ao falar de "aceleração" ou "desaceleração", baseie-se exclusivamente na TABELA 2 (Variação da Média Diária).
+                            Responda em português.
                             """
                             response = model.generate_content(prompt)
                             st.markdown(response.text)
