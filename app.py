@@ -3,19 +3,17 @@ import pandas as pd
 import numpy as np
 from xgboost import XGBRegressor
 from datetime import timedelta
-import plotly.express as px
 import requests
 import holidays
 
-st.set_page_config(page_title="Forecasting 14 Dias", layout="wide")
-st.title("📊 Previsão de Vendas (14 Dias) - Comparativo Justo")
+st.set_page_config(page_title="Forecasting XGBoost Clean", layout="wide")
+st.title("📊 Previsão de Vendas (14 Dias) - XGBoost Otimizado")
 
 # --- 1. FUNÇÕES AUXILIARES ---
 def get_holidays_calendar(start_date, end_date):
     br_holidays = holidays.Brazil(subdiv='SP', state='SP')
     date_range = pd.date_range(start_date, end_date)
-    return pd.DataFrame([{'Date': d, 'IsHoliday': 1 if d in br_holidays else 0, 
-                          'HolidayName': br_holidays.get(d)} for d in date_range])
+    return pd.DataFrame([{'Date': d, 'IsHoliday': 1 if d in br_holidays else 0} for d in date_range])
 
 def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
     try:
@@ -51,8 +49,42 @@ def load_data(uploaded_file):
     
     return df.groupby(['Date','SKU','Description'])['Orders'].sum().reset_index()
 
-# --- 3. MOTOR DE PREVISÃO ---
-def run_forecast(df_hist, days_ahead=14):
+# --- 3. PRÉ-PROCESSAMENTO INTELIGENTE (NOVO) ---
+def clean_outliers(df):
+    """
+    Remove picos de implantação (ex: dia 26/01) para não confundir o Machine Learning.
+    Substitui valores > 3x a mediana recente pela própria mediana.
+    """
+    df = df.sort_values(['SKU', 'Date'])
+    
+    # Identifica itens Vero
+    vero_mask = df['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
+    vero_skus = df[vero_mask]['SKU'].unique()
+    
+    df_clean = df.copy()
+    
+    for sku in vero_skus:
+        # Pega histórico do SKU
+        mask = df_clean['SKU'] == sku
+        series = df_clean.loc[mask, 'Orders']
+        
+        # Calcula mediana móvel (janela de 14 dias) para ter uma base de comparação
+        rolling_median = series.rolling(window=14, min_periods=1, center=True).median()
+        
+        # Se o valor for > 4x a mediana local (Pico absurdo), substitui pela mediana
+        # Isso mata o dia 26/01 (10k) transformando-o em algo como 2.5k (se a mediana for essa)
+        is_outlier = series > (rolling_median * 4)
+        
+        if is_outlier.any():
+            df_clean.loc[mask & is_outlier, 'Orders'] = rolling_median[is_outlier]
+            
+    return df_clean
+
+# --- 4. MOTOR DE PREVISÃO (XGBOOST PURO) ---
+def run_forecast(df_hist_raw, days_ahead=14):
+    # 1. Limpeza de Dados ("Sanitização")
+    df_hist = clean_outliers(df_hist_raw)
+    
     end_date_hist = df_hist['Date'].max()
     dates_future = pd.date_range(df_hist['Date'].min(), end_date_hist + timedelta(days=days_ahead))
     
@@ -83,7 +115,7 @@ def run_forecast(df_hist, days_ahead=14):
     df_master = pd.merge(df_master, df_hist[['Date','SKU','Orders']], on=['Date','SKU'], how='left')
     df_master.loc[df_master['Date'] <= end_date_hist, 'Orders'] = df_master.loc[df_master['Date'] <= end_date_hist, 'Orders'].fillna(0)
 
-    # Features
+    # Features (Agora geradas com dados limpos!)
     def gen_feat(d):
         d = d.sort_values(['SKU', 'Date'])
         d['DayOfWeek'] = d['Date'].dt.dayofweek
@@ -95,31 +127,10 @@ def run_forecast(df_hist, days_ahead=14):
     df_feat = gen_feat(df_master)
     train = df_feat[df_feat['Date'] <= end_date_hist].dropna()
     
-    # Treino
+    # Treino (XGBoost Ativado para TODOS)
     feat_cols = ['DayOfWeek','IsWeekend','IsHoliday','Temp_Avg','Rain_mm','lag_1','lag_7','rolling_mean_7']
-    model = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6, n_jobs=-1)
+    model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1) # Ajuste fino de hiperparâmetros
     model.fit(train[feat_cols], train['Orders'])
-
-    # Lift Vero Inteligente (Compara Terça x Terça)
-    last_day = end_date_hist
-    compare_day = end_date_hist - timedelta(days=7) # Compara com a mesma semana anterior
-    
-    vero_mask = df_hist['Description'].str.lower().str.contains('vero|primavera|roxa', regex=True)
-    vero_skus = df_hist[vero_mask]['SKU'].unique()
-    
-    lift_factors = {}
-    for sku in vero_skus:
-        # Pega volume do último dia real e do mesmo dia na semana anterior
-        sales_new = df_hist[(df_hist['Date'] == last_day) & (df_hist['SKU'] == sku)]['Orders'].sum()
-        sales_old = df_hist[(df_hist['Date'] == compare_day) & (df_hist['SKU'] == sku)]['Orders'].sum()
-        
-        if sales_new > 0 and sales_old > 10:
-            factor = sales_new / sales_old
-            factor = min(factor, 2.5) # Trava anti-pico
-            factor = max(factor, 1.0)
-        else:
-            factor = 1.0
-        lift_factors[sku] = factor
 
     # Loop Previsão
     preds = []
@@ -128,26 +139,22 @@ def run_forecast(df_hist, days_ahead=14):
     
     for i in range(1, days_ahead + 1):
         nxt = end_date_hist + timedelta(days=i)
-        nxt_base = df_master[df_master['Date'] == nxt][['Date','SKU','Description','Temp_Avg','Rain_mm','IsHoliday','HolidayName']].copy()
+        nxt_base = df_master[df_master['Date'] == nxt][['Date','SKU','Description','Temp_Avg','Rain_mm','IsHoliday']].copy()
         
         tmp = pd.concat([curr, nxt_base], sort=False)
         tmp = gen_feat(tmp)
         row = tmp[tmp['Date'] == nxt].copy()
         
         y = np.maximum(model.predict(row[feat_cols].fillna(0)), 0)
-        row['Orders'] = y
+        row['Orders'] = y.round(0)
         
-        for sku, fac in lift_factors.items():
-            row.loc[row['SKU']==sku, 'Orders'] *= fac
-            
-        row['Orders'] = row['Orders'].round(0)
         preds.append(row)
         curr = pd.concat([curr, row], sort=False)
         prog.progress(i/days_ahead)
         
-    return pd.concat(preds), df_hist
+    return pd.concat(preds), df_hist_raw # Retorna dados raw para comparativo real
 
-# --- 4. INTERFACE ---
+# --- 5. INTERFACE ---
 uploaded_file = st.file_uploader("📂 Carregue data.xlsx", type=['csv', 'xlsx'])
 
 if uploaded_file:
@@ -159,55 +166,48 @@ if uploaded_file:
         if st.button("🚀 Gerar Previsão 14 Dias"):
             forecast, history = run_forecast(df_raw, days_ahead=14)
             
-            # --- MÉTRICAS COMPARATIVAS (AJUSTE FINO) ---
+            # --- PREPARAÇÃO DO ARQUIVO FINAL (PIVOT) ---
+            # Transforma de (Data, SKU, Qtd) para (SKU, Desc, Dia1, Dia2...)
+            df_pivot = forecast.pivot_table(index=['SKU', 'Description'], 
+                                          columns='Date', 
+                                          values='Orders', 
+                                          aggfunc='sum').reset_index()
             
-            # 1. Passado (21 dias vs 21 dias)
-            past_start = today - timedelta(days=20)
-            p_curr = history[(history['Date']>=past_start) & (history['Date']<=today)]['Orders'].sum()
-            p_ly = history[(history['Date']>=past_start-timedelta(weeks=52)) & (history['Date']<=today-timedelta(weeks=52))]['Orders'].sum()
-            p_2y = history[(history['Date']>=past_start-timedelta(weeks=104)) & (history['Date']<=today-timedelta(weeks=104))]['Orders'].sum()
-            
-            # 2. Futuro (14 dias vs 14 dias)
+            # Formata colunas de data para ficar bonito (ex: 28/01)
+            new_cols = []
+            for c in df_pivot.columns:
+                if isinstance(c, pd.Timestamp):
+                    new_cols.append(c.strftime('%d/%m'))
+                else:
+                    new_cols.append(c)
+            df_pivot.columns = new_cols
+
+            # --- MÉTRICAS COMPARATIVAS ---
             f_curr = forecast['Orders'].sum()
             
-            # O Segredo: Definir janela exata de 14 dias para o passado
-            # Data de hoje + 1 dia (inicio previsao) até +14 dias
-            fut_start_date = today + timedelta(days=1)
-            fut_end_date = today + timedelta(days=14)
+            # Comparativo Justo (14 dias alinhados)
+            fut_start = today + timedelta(days=1)
+            fut_end = today + timedelta(days=14)
             
-            # Ano Passado (Alinhado por Semanas)
-            ly_start = fut_start_date - timedelta(weeks=52)
-            ly_end = fut_end_date - timedelta(weeks=52)
+            ly_start = fut_start - timedelta(weeks=52)
+            ly_end = fut_end - timedelta(weeks=52)
             f_ly = history[(history['Date'] >= ly_start) & (history['Date'] <= ly_end)]['Orders'].sum()
-            
-            # 2 Anos Atrás
-            l2y_start = fut_start_date - timedelta(weeks=104)
-            l2y_end = fut_end_date - timedelta(weeks=104)
+
+            l2y_start = fut_start - timedelta(weeks=104)
+            l2y_end = fut_end - timedelta(weeks=104)
             f_2y = history[(history['Date'] >= l2y_start) & (history['Date'] <= l2y_end)]['Orders'].sum()
 
-            # --- DISPLAY ---
             st.divider()
-            st.subheader("📊 Relatório de Performance (Comparativo Justo)")
+            st.subheader("📊 Resumo Executivo")
             
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("#### 🔙 Passado (21 Dias)")
-                st.metric("Volume Realizado", f"{int(p_curr):,}")
-                st.metric("vs Ano Passado", f"{((p_curr/p_ly)-1)*100:.1f}%")
-                st.metric("vs 2 Anos Atrás", f"{((p_curr/p_2y)-1)*100:.1f}%")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Previsão Total (14 Dias)", f"{int(f_curr):,}")
+            col2.metric("vs Ano Passado (2025)", f"{((f_curr/f_ly)-1)*100:.1f}%" if f_ly else "N/D")
+            col3.metric("vs 2 Anos Atrás (2024)", f"{((f_curr/f_2y)-1)*100:.1f}%" if f_2y else "N/D")
             
-            with col2:
-                st.markdown("#### 🔜 Futuro (14 Dias)")
-                st.metric("Volume Projetado", f"{int(f_curr):,}")
-                st.metric("vs Ano Passado", f"{((f_curr/f_ly)-1)*100:.1f}%" if f_ly > 0 else "N/D")
-                st.metric("vs 2 Anos Atrás", f"{((f_curr/f_2y)-1)*100:.1f}%" if f_2y > 0 else "N/D")
+            st.write("---")
+            st.write("### 🗓️ Detalhamento Diário por Produto")
+            st.dataframe(df_pivot)
             
-            st.caption(f"*Período de Comparação Futura: {fut_start_date.strftime('%d/%m')} a {fut_end_date.strftime('%d/%m')} vs Mesmas Semanas dos Anos Anteriores.")
-            st.divider()
-            
-            sel_sku = st.selectbox("Produto:", forecast['Description'].unique())
-            fig = px.line(forecast[forecast['Description']==sel_sku], x='Date', y='Orders', markers=True, title=sel_sku)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            csv = forecast.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar CSV (14 Dias)", csv, "previsao_vendas_ajustada.csv", "text/csv")
+            csv = df_pivot.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Baixar Planilha Detalhada", csv, "previsao_detalhada_14d.csv", "text/csv")
