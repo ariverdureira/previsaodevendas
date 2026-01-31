@@ -59,27 +59,19 @@ def classify_group(desc):
     if not isinstance(desc, str): return 'Outros'
     txt = desc.lower()
     
-    # 1. Prioridade Absoluta: Americana Bola
     if 'americana bola' in txt: return 'Americana Bola'
     
-    # 2. Grupo Vero
-    vero_keys = [
-        'vero', 'primavera', 'roxa', 
-        'mix', 'repolho', 'couve', 'rucula hg'
-    ]
+    vero_keys = ['vero', 'primavera', 'roxa', 'mix', 'repolho', 'couve', 'rucula hg']
     if any(x in txt for x in vero_keys): return 'Vero'
     
-    # 3. Minis
     if 'mini' in txt: return 'Minis'
     
-    # 4. Regra Insalata > 100g
     if 'insalata' in txt:
         match = re.search(r'(\d+)\s*g', txt)
         if match:
             weight = int(match.group(1))
             if weight > 100: return 'Saladas'
     
-    # 5. Legumes
     legumes_keys = [
         'legume', 'cenoura', 'beterraba', 'abobrinha',
         'batata', 'mandioca', 'mandioquinha', 'sopa',
@@ -88,7 +80,6 @@ def classify_group(desc):
     ]
     if any(x in txt for x in legumes_keys): return 'Legumes'
     
-    # 6. Saladas
     saladas_keys = ['salada', 'alface', 'rúcula', 'rucula', 'agrião', 'agriao', 'insalata']
     if any(x in txt for x in saladas_keys): return 'Saladas'
     
@@ -130,7 +121,7 @@ def load_data(uploaded_file):
         st.error(f"Erro ao ler arquivo: {e}")
         return pd.DataFrame()
 
-# --- 3. PRÉ-PROCESSAMENTO PARA IA ---
+# --- 3. PRÉ-PROCESSAMENTO ---
 
 def filter_history_vero(df):
     mask_vero = df['Group'] == 'Vero'
@@ -250,6 +241,12 @@ def run_forecast(df_raw, days_ahead=14):
 
 uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
 
+# Limpa memória se trocar de arquivo
+if 'last_file' not in st.session_state: st.session_state.last_file = None
+if uploaded_file and uploaded_file != st.session_state.last_file:
+    st.session_state.clear()
+    st.session_state.last_file = uploaded_file
+
 if uploaded_file:
     df_raw = load_data(uploaded_file)
     
@@ -257,143 +254,144 @@ if uploaded_file:
         max_date = df_raw['Date'].max()
         st.info(f"Dados até: **{max_date.date()}**")
         
+        # Botão para processar (Salva no Session State para não sumir)
         if st.button("🚀 Gerar Previsão"):
-            with st.spinner("Processando..."):
+            with st.spinner("Calculando previsão..."):
                 try:
-                    forecast = run_forecast(df_raw, days_ahead=14)
-                    
-                    if not forecast.empty:
-                        f_start = max_date + timedelta(days=1)
-                        f_end = max_date + timedelta(days=14)
-                        
-                        ly_start = f_start - timedelta(weeks=52)
-                        ly_end = f_end - timedelta(weeks=52)
-                        l2y_start = f_start - timedelta(weeks=104)
-                        l2y_end = f_end - timedelta(weeks=104)
-                        
-                        hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
-                        hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
-                        
-                        groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis']
-                        summary = []
-                        
-                        for g in groups:
-                            v_curr = forecast[forecast['Group'] == g]['Orders'].sum()
-                            v_ly = hist_ly[hist_ly['Group'] == g]['Orders'].sum()
-                            v_2y = hist_2y[hist_2y['Group'] == g]['Orders'].sum()
-                            
-                            p_ly = ((v_curr / v_ly) - 1) * 100 if v_ly > 0 else 0
-                            p_2y = ((v_curr / v_2y) - 1) * 100 if v_2y > 0 else 0
-                            
-                            summary.append({
-                                'Grupo': g,
-                                'Previsão 14d': int(v_curr),
-                                '2025': int(v_ly),
-                                'Var % (25)': f"{p_ly:+.1f}%",
-                                '2024': int(v_2y),
-                                'Var % (24)': f"{p_2y:+.1f}%"
-                            })
-                            
-                        tot_cur = forecast['Orders'].sum()
-                        tot_ly = hist_ly['Orders'].sum()
-                        tot_2y = hist_2y['Orders'].sum()
-                        
-                        pt_ly = ((tot_cur / tot_ly) - 1) * 100 if tot_ly > 0 else 0
-                        pt_2y = ((tot_cur / tot_2y) - 1) * 100 if tot_2y > 0 else 0
-                        
-                        summary.append({
-                            'Grupo': 'TOTAL GERAL',
-                            'Previsão 14d': int(tot_cur),
-                            '2025': int(tot_ly),
-                            'Var % (25)': f"{pt_ly:+.1f}%",
-                            '2024': int(tot_2y),
-                            'Var % (24)': f"{pt_2y:+.1f}%"
-                        })
-                        
-                        st.divider()
-                        st.subheader("📊 Resumo Executivo")
-                        df_summary = pd.DataFrame(summary)
-                        st.dataframe(df_summary, hide_index=True, use_container_width=True)
-                        
-                        df_piv = forecast.pivot_table(
-                            index=['SKU', 'Description', 'Group'], 
-                            columns='Date', 
-                            values='Orders', 
-                            aggfunc='sum'
-                        ).reset_index()
-                        
-                        num_cols = df_piv.select_dtypes(include=[np.number]).columns
-                        total_row = df_piv[num_cols].sum()
-                        total_row['SKU'] = 'TOTAL'
-                        total_row['Description'] = 'TOTAL GERAL'
-                        total_row['Group'] = '-'
-                        
-                        df_piv = pd.concat([df_piv, pd.DataFrame([total_row])], ignore_index=True)
-                        
-                        cols_fmt = []
-                        for c in df_piv.columns:
-                            if isinstance(c, pd.Timestamp):
-                                cols_fmt.append(c.strftime('%d/%m'))
-                            else:
-                                cols_fmt.append(c)
-                        df_piv.columns = cols_fmt
-                        
-                        st.write("### 🗓️ Previsão Detalhada")
-                        st.dataframe(df_piv)
-                        
-                        csv = df_piv.to_csv(index=False).encode('utf-8')
-                        st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
-
-                        # --- IA GEMINI (CONEXÃO DIRETA) ---
-                        st.divider()
-                        st.subheader("🤖 Analista IA")
-                        
-                        api_key = st.text_input("Insira sua Gemini API Key:", type="password")
-                        
-                        if api_key:
-                            try:
-                                genai.configure(api_key=api_key)
-                                model = genai.GenerativeModel('gemini-1.5-flash')
-                                
-                                # Prepara contexto leve
-                                df_hist_recent = df_raw[df_raw['Date'] >= (max_date - timedelta(days=90))].copy()
-                                df_hist_recent['Tipo'] = 'Histórico (Últimos 90 dias)'
-                                
-                                df_fore_ia = forecast.copy()
-                                df_fore_ia['Tipo'] = 'Previsão (Próx. 14 dias)'
-                                
-                                # Resumos para o Prompt
-                                resumo_grupo = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_markdown()
-                                
-                                top_sku_prev = df_fore_ia.groupby('Description')['Orders'].sum().nlargest(5).to_markdown()
-                                
-                                st.info("Pergunte algo como: 'Qual a tendência de crescimento do grupo Vero?' ou 'Quais os 3 produtos mais vendidos na previsão?'")
-                                query = st.text_area("Pergunta:")
-                                
-                                if st.button("Consultar IA"):
-                                    with st.spinner("Analisando..."):
-                                        prompt = f"""
-                                        Você é um analista sênior de planejamento de demanda.
-                                        Analise estes dados resumidos:
-                                        
-                                        1. Vendas por Grupo (Histórico Recente vs Previsão):
-                                        {resumo_grupo}
-                                        
-                                        2. Top 5 Produtos na Previsão (Volume):
-                                        {top_sku_prev}
-                                        
-                                        Total Geral Previsto: {int(tot_cur)} unidades.
-                                        
-                                        Pergunta do usuário: {query}
-                                        
-                                        Responda de forma direta e em português.
-                                        """
-                                        response = model.generate_content(prompt)
-                                        st.markdown(response.text)
-                                        
-                            except Exception as e:
-                                st.error(f"Erro na conexão com IA: {e}")
-                        
+                    forecast_result = run_forecast(df_raw, days_ahead=14)
+                    if not forecast_result.empty:
+                        st.session_state['forecast_data'] = forecast_result
+                        st.session_state['has_run'] = True
                 except Exception as e:
-                    st.error(f"Erro na execução: {e}")
-                    st.write(traceback.format_exc())
+                    st.error(f"Erro no cálculo: {e}")
+
+        # Se já rodou (está na memória), exibe os resultados
+        if st.session_state.get('has_run', False):
+            forecast = st.session_state['forecast_data']
+            
+            # --- CÁLCULO DE RESUMOS ---
+            f_start = max_date + timedelta(days=1)
+            f_end = max_date + timedelta(days=14)
+            
+            ly_start = f_start - timedelta(weeks=52)
+            ly_end = f_end - timedelta(weeks=52)
+            l2y_start = f_start - timedelta(weeks=104)
+            l2y_end = f_end - timedelta(weeks=104)
+            
+            hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
+            hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
+            
+            groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis']
+            summary = []
+            
+            for g in groups:
+                v_curr = forecast[forecast['Group'] == g]['Orders'].sum()
+                v_ly = hist_ly[hist_ly['Group'] == g]['Orders'].sum()
+                v_2y = hist_2y[hist_2y['Group'] == g]['Orders'].sum()
+                
+                p_ly = ((v_curr / v_ly) - 1) * 100 if v_ly > 0 else 0
+                p_2y = ((v_curr / v_2y) - 1) * 100 if v_2y > 0 else 0
+                
+                summary.append({
+                    'Grupo': g,
+                    'Previsão 14d': int(v_curr),
+                    '2025': int(v_ly),
+                    'Var % (25)': f"{p_ly:+.1f}%",
+                    '2024': int(v_2y),
+                    'Var % (24)': f"{p_2y:+.1f}%"
+                })
+            
+            tot_cur = forecast['Orders'].sum()
+            tot_ly = hist_ly['Orders'].sum()
+            tot_2y = hist_2y['Orders'].sum()
+            
+            pt_ly = ((tot_cur / tot_ly) - 1) * 100 if tot_ly > 0 else 0
+            pt_2y = ((tot_cur / tot_2y) - 1) * 100 if tot_2y > 0 else 0
+            
+            summary.append({
+                'Grupo': 'TOTAL GERAL',
+                'Previsão 14d': int(tot_cur),
+                '2025': int(tot_ly),
+                'Var % (25)': f"{pt_ly:+.1f}%",
+                '2024': int(tot_2y),
+                'Var % (24)': f"{pt_2y:+.1f}%"
+            })
+            
+            st.divider()
+            st.subheader("📊 Resumo Executivo")
+            df_summary = pd.DataFrame(summary)
+            st.dataframe(df_summary, hide_index=True, use_container_width=True)
+            
+            # --- TABELA DETALHADA ---
+            df_piv = forecast.pivot_table(
+                index=['SKU', 'Description', 'Group'], 
+                columns='Date', 
+                values='Orders', 
+                aggfunc='sum'
+            ).reset_index()
+            
+            num_cols = df_piv.select_dtypes(include=[np.number]).columns
+            total_row = df_piv[num_cols].sum()
+            total_row['SKU'] = 'TOTAL'
+            total_row['Description'] = 'TOTAL GERAL'
+            total_row['Group'] = '-'
+            
+            df_piv = pd.concat([df_piv, pd.DataFrame([total_row])], ignore_index=True)
+            
+            cols_fmt = []
+            for c in df_piv.columns:
+                if isinstance(c, pd.Timestamp):
+                    cols_fmt.append(c.strftime('%d/%m'))
+                else:
+                    cols_fmt.append(c)
+            df_piv.columns = cols_fmt
+            
+            st.write("### 🗓️ Previsão Detalhada")
+            st.dataframe(df_piv)
+            
+            csv = df_piv.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
+
+            # --- IA GEMINI (AGORA NÃO CAUSA RESTART) ---
+            st.divider()
+            st.subheader("🤖 Analista IA")
+            
+            api_key = st.text_input("Insira sua Gemini API Key:", type="password")
+            
+            if api_key:
+                try:
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    
+                    df_hist_recent = df_raw[df_raw['Date'] >= (max_date - timedelta(days=90))].copy()
+                    df_hist_recent['Tipo'] = 'Histórico (90d)'
+                    
+                    df_fore_ia = forecast.copy()
+                    df_fore_ia['Tipo'] = 'Previsão (14d)'
+                    
+                    resumo_grupo = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_markdown()
+                    top_sku = df_fore_ia.groupby('Description')['Orders'].sum().nlargest(5).to_markdown()
+                    
+                    st.info("💡 Ex: 'Por que o grupo Vero está variando?' ou 'Quais os top produtos?'")
+                    query = st.text_area("Pergunta:", key="gemini_query")
+                    
+                    if st.button("Consultar IA"):
+                        with st.spinner("Analisando..."):
+                            prompt = f"""
+                            Você é um analista de demanda.
+                            Dados:
+                            1. Vendas por Grupo:
+                            {resumo_grupo}
+                            
+                            2. Top 5 Produtos Previstos:
+                            {top_sku}
+                            
+                            Total Previsto: {int(tot_cur)}
+                            
+                            Pergunta: {query}
+                            """
+                            response = model.generate_content(prompt)
+                            st.markdown(response.text)
+                            
+                except Exception as e:
+                    st.error(f"Erro Conexão IA: {e}")
