@@ -254,7 +254,7 @@ if uploaded_file:
         max_date = df_raw['Date'].max()
         st.info(f"Dados até: **{max_date.date()}**")
         
-        # Botão para processar (Salva no Session State para não sumir)
+        # Botão para processar
         if st.button("🚀 Gerar Previsão"):
             with st.spinner("Calculando previsão..."):
                 try:
@@ -265,7 +265,7 @@ if uploaded_file:
                 except Exception as e:
                     st.error(f"Erro no cálculo: {e}")
 
-        # Se já rodou (está na memória), exibe os resultados
+        # Se já rodou, exibe resultados
         if st.session_state.get('has_run', False):
             forecast = st.session_state['forecast_data']
             
@@ -352,7 +352,7 @@ if uploaded_file:
             csv = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
 
-            # --- IA GEMINI (AGORA NÃO CAUSA RESTART) ---
+            # --- IA GEMINI (COM AUTO-DESCOBERTA DE MODELO) ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -361,7 +361,33 @@ if uploaded_file:
             if api_key:
                 try:
                     genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-1.5-flash')
+                    
+                    # --- LÓGICA DE AUTO-DESCOBERTA ---
+                    # Lista os modelos que sua chave tem acesso
+                    available_models = []
+                    try:
+                        for m in genai.list_models():
+                            if 'generateContent' in m.supported_generation_methods:
+                                available_models.append(m.name)
+                    except: pass
+
+                    # Tenta escolher o melhor automaticamente
+                    model_name = 'gemini-1.5-flash' # Preferido
+                    
+                    if not available_models:
+                        # Se não conseguiu listar, tenta o padrãozão
+                        model_name = 'gemini-1.5-flash'
+                    else:
+                        # Procura Flash ou Pro na lista
+                        if any('flash' in m for m in available_models):
+                            model_name = next(m for m in available_models if 'flash' in m)
+                        elif any('pro' in m for m in available_models):
+                            model_name = next(m for m in available_models if 'pro' in m)
+                        else:
+                            model_name = available_models[0]
+                    
+                    model = genai.GenerativeModel(model_name)
+                    # ----------------------------------
                     
                     df_hist_recent = df_raw[df_raw['Date'] >= (max_date - timedelta(days=90))].copy()
                     df_hist_recent['Tipo'] = 'Histórico (90d)'
@@ -369,10 +395,11 @@ if uploaded_file:
                     df_fore_ia = forecast.copy()
                     df_fore_ia['Tipo'] = 'Previsão (14d)'
                     
-                    resumo_grupo = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_markdown()
-                    top_sku = df_fore_ia.groupby('Description')['Orders'].sum().nlargest(5).to_markdown()
+                    # Usando .to_string() para evitar erros de biblioteca
+                    resumo_grupo = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_string()
+                    top_sku = df_fore_ia.groupby('Description')['Orders'].sum().nlargest(5).to_string()
                     
-                    st.info("💡 Ex: 'Por que o grupo Vero está variando?' ou 'Quais os top produtos?'")
+                    st.info(f"Modelo Conectado: {model_name}. \nPergunte algo como: 'Por que o grupo Vero está variando?'")
                     query = st.text_area("Pergunta:", key="gemini_query")
                     
                     if st.button("Consultar IA"):
@@ -395,3 +422,4 @@ if uploaded_file:
                             
                 except Exception as e:
                     st.error(f"Erro Conexão IA: {e}")
+                    st.warning("Dica: Verifique se sua API Key é válida no Google AI Studio.")
