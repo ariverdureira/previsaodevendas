@@ -10,8 +10,9 @@ import re
 import google.generativeai as genai
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Forecasting Final", layout="wide")
-st.title("📊 Previsão de Vendas (14 Dias) - Consolidado")
+# Define apenas o nome da aba do navegador e o layout. 
+# O título visual será inserido na Parte 2 via HTML.
+st.set_page_config(page_title="PCP Verdureira", layout="wide")
 
 # --- 1. FUNÇÕES AUXILIARES ---
 
@@ -239,12 +240,12 @@ def run_forecast(df_raw, days_ahead=14):
     return pd.concat(preds)
 # --- 5. INTERFACE DO USUÁRIO ---
 
-# Configuração de estilo para centralizar título e ajustar cores
+# Estilo para centralizar título e ajustar cor (Verde Neon Verdureira)
 st.markdown("""
     <style>
         .title-text {
             text-align: center;
-            color: #8CFF00; /* Verde Neon similar ao da marca */
+            color: #8CFF00;
             font-family: sans-serif;
             font-weight: bold;
             font-size: 3rem;
@@ -257,21 +258,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CABEÇALHO COM LOGO ---
-# Cria 3 colunas para centralizar a imagem na coluna do meio
 c1, c2, c3 = st.columns([1, 2, 1])
-
 with c2:
     try:
-        # Tenta carregar a logo. Ajuste o 'width' se ficar muito grande ou pequeno.
         st.image("AF-VERDUREIRA-LOGO-HORIZONTAL-07.png", use_container_width=True)
     except:
-        # Fallback caso a imagem não esteja na pasta
-        st.warning("⚠️ Imagem 'AF-VERDUREIRA-LOGO-HORIZONTAL-07.png' não encontrada na pasta.")
+        st.warning("⚠️ Logo não encontrada.")
 
-# Título Customizado Centralizado
+# Título Customizado (HTML)
 st.markdown('<h1 class="title-text">PCP - Previsão de Vendas</h1>', unsafe_allow_html=True)
 
-# --- INÍCIO DA LÓGICA DO APP ---
+# --- LÓGICA DO APP ---
 
 uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
 
@@ -286,9 +283,8 @@ if uploaded_file:
     
     if not df_raw.empty:
         max_date = df_raw['Date'].max()
-        # st.info removido para limpar o visual, já que o título domina
         
-        # Botão para processar (Centralizado também para combinar)
+        # Botão centralizado
         col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
         with col_btn2:
             processar = st.button("🚀 Gerar Previsão", use_container_width=True)
@@ -303,11 +299,10 @@ if uploaded_file:
                 except Exception as e:
                     st.error(f"Erro no cálculo: {e}")
 
-        # Se já rodou, exibe resultados
         if st.session_state.get('has_run', False):
             forecast = st.session_state['forecast_data']
             
-            # --- CÁLCULO DE RESUMOS (ANUAL) ---
+            # Resumos
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=14)
             
@@ -360,7 +355,7 @@ if uploaded_file:
             df_summary = pd.DataFrame(summary)
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
             
-            # --- TABELA DETALHADA ---
+            # Tabela Detalhada
             df_piv = forecast.pivot_table(
                 index=['SKU', 'Description', 'Group'], 
                 columns='Date', 
@@ -390,7 +385,7 @@ if uploaded_file:
             csv = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
 
-            # --- IA GEMINI (COM CONTEXTO MELHORADO) ---
+            # --- IA GEMINI ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -400,7 +395,6 @@ if uploaded_file:
                 try:
                     genai.configure(api_key=api_key)
                     
-                    # Auto-Descoberta de Modelo
                     available_models = []
                     try:
                         for m in genai.list_models():
@@ -419,12 +413,9 @@ if uploaded_file:
                     
                     model = genai.GenerativeModel(model_name)
                     
-                    # --- PREPARANDO DADOS ---
-                    
-                    # 1. Comparativo Anual
+                    # Preparação Dados IA
                     tabela_anual_str = df_summary.to_string(index=False)
 
-                    # 2. Ritmo de Vendas (Média Diária)
                     dt_cut = max_date - timedelta(days=60)
                     df_h_recent = df_raw[df_raw['Date'] > dt_cut]
                     days_hist = (df_h_recent['Date'].max() - df_h_recent['Date'].min()).days + 1
@@ -442,10 +433,9 @@ if uploaded_file:
                     df_ritmo['Aceleração de Vendas (%)'] = ((df_ritmo['Média Diária (Prevista 14d)'] / df_ritmo['Média Diária (Últimos 60d)']) - 1) * 100
                     tabela_ritmo_str = df_ritmo.round(1).to_string()
                     
-                    # 3. Top Produtos
                     top_sku = forecast.groupby('Description')['Orders'].sum().nlargest(5).to_string()
                     
-                    st.info(f"Modelo: {model_name}. Dados carregados: Comparativo Anual + Ritmo Diário.")
+                    st.info(f"Modelo: {model_name}. Dados: Comparativo Anual + Ritmo Diário.")
                     query = st.text_area("Pergunta:", key="gemini_query")
                     
                     if st.button("Consultar IA"):
@@ -457,7 +447,6 @@ if uploaded_file:
                             {tabela_anual_str}
                             
                             TABELA 2: RITMO DE VENDAS (Média Diária)
-                            Mostra se a venda diária está acelerando ou freando vs últimos 2 meses.
                             {tabela_ritmo_str}
                             
                             TABELA 3: TOP PRODUTOS
