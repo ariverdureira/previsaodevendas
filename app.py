@@ -269,7 +269,7 @@ if uploaded_file:
         if st.session_state.get('has_run', False):
             forecast = st.session_state['forecast_data']
             
-            # --- CÁLCULO DE RESUMOS ---
+            # --- CÁLCULO DE RESUMOS (ANUAL) ---
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=14)
             
@@ -352,7 +352,7 @@ if uploaded_file:
             csv = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
 
-            # --- IA GEMINI (AGORA COM DADOS ANUAIS) ---
+            # --- IA GEMINI (CORRIGIDO: CÁLCULO DE MÉDIA DIÁRIA) ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -381,22 +381,43 @@ if uploaded_file:
                     
                     model = genai.GenerativeModel(model_name)
                     
-                    # PREPARANDO O CONTEXTO PARA A IA
+                    # --- PREPARANDO DADOS CORRETAMENTE ---
                     
-                    # 1. Tabela Executiva (Com variação Anual)
-                    # Convertemos a tabela df_summary que já calculamos acima para texto
+                    # 1. Tabela Executiva (Comparativo Anual)
                     tabela_anual_str = df_summary.to_string(index=False)
 
-                    # 2. Histórico Recente (Para contexto de curto prazo)
-                    df_hist_recent = df_raw[df_raw['Date'] >= (max_date - timedelta(days=60))].copy()
-                    df_hist_recent['Tipo'] = 'Histórico (60d)'
-                    df_fore_ia = forecast.copy()
-                    df_fore_ia['Tipo'] = 'Previsão (14d)'
+                    # 2. Tabela de Ritmo (Média Diária) - AQUI ESTAVA O ERRO
+                    # Vamos calcular a venda MÉDIA por dia dos últimos 60 dias vs próximos 14 dias
                     
-                    resumo_recente = pd.concat([df_hist_recent, df_fore_ia]).groupby(['Group', 'Tipo'])['Orders'].sum().reset_index().to_string()
-                    top_sku = df_fore_ia.groupby('Description')['Orders'].sum().nlargest(5).to_string()
+                    # Dados Históricos (60 dias)
+                    dt_cut = max_date - timedelta(days=60)
+                    df_h_recent = df_raw[df_raw['Date'] > dt_cut]
+                    days_hist = (df_h_recent['Date'].max() - df_h_recent['Date'].min()).days + 1
+                    days_hist = max(days_hist, 1) # Evita divisão por zero
                     
-                    st.info(f"Modelo: {model_name}. \nAgora a IA tem acesso aos dados de variação anual (2024/2025).")
+                    # Agrupa e divide pelos dias
+                    media_hist = df_h_recent.groupby('Group')['Orders'].sum() / days_hist
+                    
+                    # Dados Previsão (14 dias)
+                    days_fore = 14
+                    media_fore = forecast.groupby('Group')['Orders'].sum() / days_fore
+                    
+                    # Cria DataFrame de Comparação de Ritmo
+                    df_ritmo = pd.DataFrame({
+                        'Média Diária (Últimos 60d)': media_hist,
+                        'Média Diária (Prevista 14d)': media_fore
+                    })
+                    
+                    # Calcula Variação de Ritmo
+                    df_ritmo['Aceleração de Vendas (%)'] = ((df_ritmo['Média Diária (Prevista 14d)'] / df_ritmo['Média Diária (Últimos 60d)']) - 1) * 100
+                    
+                    # Formata para string
+                    tabela_ritmo_str = df_ritmo.round(1).to_string()
+                    
+                    # 3. Top Produtos
+                    top_sku = forecast.groupby('Description')['Orders'].sum().nlargest(5).to_string()
+                    
+                    st.info(f"Modelo: {model_name}. IA ajustada para comparar médias diárias (ritmo de vendas).")
                     query = st.text_area("Pergunta:", key="gemini_query")
                     
                     if st.button("Consultar IA"):
@@ -404,21 +425,22 @@ if uploaded_file:
                             prompt = f"""
                             Você é um analista sênior de planejamento de demanda.
                             
-                            Use as tabelas abaixo para responder à pergunta do usuário.
+                            Analise os dados abaixo com precisão.
                             
-                            TABELA 1: RESUMO EXECUTIVO (COMPARATIVO ANUAL)
-                            (Use esta tabela para falar sobre crescimento ou queda em relação a 2024 e 2025)
+                            TABELA 1: COMPARATIVO ANUAL (Volume Total)
+                            Compare o volume previsto com os anos anteriores (2024 e 2025).
                             {tabela_anual_str}
                             
-                            TABELA 2: TENDÊNCIA RECENTE (CURTO PRAZO)
-                            {resumo_recente}
+                            TABELA 2: RITMO DE VENDAS (Média Diária)
+                            Esta tabela mostra se o ritmo diário de vendas está acelerando ou desacelerando em relação aos últimos 2 meses.
+                            {tabela_ritmo_str}
                             
-                            TABELA 3: TOP 5 PRODUTOS PREVISTOS
+                            TABELA 3: TOP PRODUTOS
                             {top_sku}
                             
                             Pergunta do usuário: {query}
                             
-                            Responda em português, citando as porcentagens de variação quando relevante.
+                            Responda em português. Ao falar de "aceleração" ou "desaceleração", baseie-se exclusivamente na TABELA 2 (Variação da Média Diária).
                             """
                             response = model.generate_content(prompt)
                             st.markdown(response.text)
