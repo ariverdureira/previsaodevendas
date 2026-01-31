@@ -10,8 +10,6 @@ import re
 import google.generativeai as genai
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-# Define apenas o nome da aba do navegador e o layout. 
-# O título visual será inserido na Parte 2 via HTML.
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
 
 # --- 1. FUNÇÕES AUXILIARES ---
@@ -158,7 +156,7 @@ def generate_features(df):
     d['roll_7'] = d.groupby('SKU')['Orders'].shift(1).rolling(7).mean()
     return d
 
-# --- 4. MOTOR DE PREVISÃO ---
+# --- 4. MOTOR DE PREVISÃO (Modificado para retornar clima) ---
 
 def run_forecast(df_raw, days_ahead=14):
     df_train_base = filter_history_vero(df_raw)
@@ -169,7 +167,15 @@ def run_forecast(df_raw, days_ahead=14):
     future_range = pd.date_range(start_date, last_date + timedelta(days=days_ahead))
     df_dates = pd.DataFrame({'Date': future_range})
     
+    # --- CLIMA ---
     weather = get_live_forecast(days=days_ahead)
+    
+    # Prepara dados de clima futuro para retornar depois
+    weather_future = pd.DataFrame()
+    if weather is not None:
+        weather_future = weather[(weather['Date'] > last_date) & (weather['Date'] <= last_date + timedelta(days=days_ahead))].copy()
+    
+    # Dados sintéticos de fallback
     np.random.seed(42)
     df_dates['Temp_Avg'] = np.random.normal(25, 3, len(df_dates))
     is_summer = df_dates['Date'].dt.month.isin([1, 2, 3, 12])
@@ -201,7 +207,7 @@ def run_forecast(df_raw, days_ahead=14):
     
     if train_data.empty:
         st.error("Erro: Dados insuficientes.")
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame() # Retorna dois DFs vazios em caso de erro
         
     features = ['DayOfWeek','IsWeekend','IsHoliday','Temp_Avg','Rain_mm','lag_1','lag_7','roll_7']
     model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1)
@@ -237,7 +243,8 @@ def run_forecast(df_raw, days_ahead=14):
         current_df = pd.concat([current_df, row_pred], sort=False)
         progress_bar.progress(i / days_ahead)
         
-    return pd.concat(preds)
+    # RETORNA A PREVISÃO E O CLIMA FUTURO USADO
+    return pd.concat(preds), weather_future
 # --- 5. INTERFACE DO USUÁRIO ---
 
 # Estilo para centralizar título e ajustar cor (Verde Neon Verdureira)
@@ -257,13 +264,14 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CABEÇALHO COM LOGO ---
+# --- CABEÇALHO COM LOGO (ALTERADO PARA JPG) ---
 c1, c2, c3 = st.columns([1, 2, 1])
 with c2:
     try:
+        # MUDANÇA AQUI: Extensão .jpg
         st.image("AF-VERDUREIRA-LOGO-HORIZONTAL-07.jpg", use_container_width=True)
     except:
-        st.warning("⚠️ Logo não encontrada.")
+        st.warning("⚠️ Logo (JPG) não encontrada.")
 
 # Título Customizado (HTML)
 st.markdown('<h1 class="title-text">PCP - Previsão de Vendas</h1>', unsafe_allow_html=True)
@@ -290,19 +298,48 @@ if uploaded_file:
             processar = st.button("🚀 Gerar Previsão", use_container_width=True)
 
         if processar:
-            with st.spinner("Calculando previsão..."):
+            with st.spinner("Calculando previsão (e obtendo clima)..."):
                 try:
-                    forecast_result = run_forecast(df_raw, days_ahead=14)
+                    # MUDANÇA AQUI: Recebe a previsão E o clima
+                    forecast_result, weather_result = run_forecast(df_raw, days_ahead=14)
+                    
                     if not forecast_result.empty:
                         st.session_state['forecast_data'] = forecast_result
+                        # Salva o clima na memória também
+                        st.session_state['weather_data'] = weather_result
                         st.session_state['has_run'] = True
                 except Exception as e:
                     st.error(f"Erro no cálculo: {e}")
+                    st.write(traceback.format_exc())
 
+        # Se já rodou, exibe resultados
         if st.session_state.get('has_run', False):
             forecast = st.session_state['forecast_data']
+            # Recupera o clima da memória
+            weather_df = st.session_state.get('weather_data', pd.DataFrame())
             
-            # Resumos
+            # --- NOVO BLOCO: PREVISÃO DO TEMPO (7 DIAS) ---
+            if not weather_df.empty:
+                st.divider()
+                st.subheader("🌤️ Previsão do Tempo (Próximos 7 Dias)")
+                st.caption("Dados meteorológicos considerados no modelo.")
+                
+                # Pega os próximos 7 dias e formata para exibição
+                w_disp = weather_df.head(7).copy()
+                w_disp['Date'] = w_disp['Date'].dt.strftime('%d/%m')
+                w_disp = w_disp.rename(columns={
+                    'Date': 'Data', 
+                    'Temp_Avg': 'Temp. Média (°C)', 
+                    'Rain_mm': 'Chuva (mm)'
+                })
+                # Formatação numérica bonita
+                w_disp['Temp. Média (°C)'] = w_disp['Temp. Média (°C)'].map('{:.1f}'.format)
+                w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
+                
+                st.dataframe(w_disp, hide_index=True, use_container_width=True)
+            # ----------------------------------------------
+
+            # --- CÁLCULO DE RESUMOS (ANUAL) ---
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=14)
             
