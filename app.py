@@ -382,7 +382,7 @@ if uploaded_file:
             df_summary = pd.DataFrame(summary)
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
             
-            # Tabela Detalhada
+            # --- TABELA DETALHADA (CORRIGIDA) ---
             df_piv = forecast.pivot_table(
                 index=['SKU', 'Description', 'Group'], 
                 columns='Date', 
@@ -390,13 +390,18 @@ if uploaded_file:
                 aggfunc='sum'
             ).reset_index()
             
+            # CORREÇÃO PANDAS: Calcula totais numéricos separadamente e converte para dict
             num_cols = df_piv.select_dtypes(include=[np.number]).columns
-            total_row = df_piv[num_cols].sum()
-            total_row['SKU'] = 'TOTAL'
-            total_row['Description'] = 'TOTAL GERAL'
-            total_row['Group'] = '-'
+            total_data = df_piv[num_cols].sum().to_dict()
             
-            df_piv = pd.concat([df_piv, pd.DataFrame([total_row])], ignore_index=True)
+            # Adiciona os textos na linha de total
+            total_data['SKU'] = 'TOTAL'
+            total_data['Description'] = 'TOTAL GERAL'
+            total_data['Group'] = '-'
+            
+            # Cria DataFrame da linha total e concatena (evita erro de dtype e warning Arrow)
+            df_total = pd.DataFrame([total_data])
+            df_piv = pd.concat([df_piv, df_total], ignore_index=True)
             
             cols_fmt = []
             for c in df_piv.columns:
@@ -407,12 +412,12 @@ if uploaded_file:
             df_piv.columns = cols_fmt
             
             st.write("### 🗓️ Previsão Detalhada")
-            st.dataframe(df_piv)
+            st.dataframe(df_piv, use_container_width=True)
             
             csv = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
 
-            # --- IA GEMINI (NOVA BIBLIOTECA GOOGLE-GENAI) ---
+            # --- IA GEMINI ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -420,10 +425,9 @@ if uploaded_file:
             
             if api_key:
                 try:
-                    # NOVA FORMA DE CONEXÃO: Criação do Client
+                    # Conexão Client (Nova Lib)
                     client = genai.Client(api_key=api_key)
                     
-                    # Preparação Dados
                     tabela_anual_str = df_summary.to_string(index=False)
 
                     dt_cut = max_date - timedelta(days=60)
@@ -466,7 +470,6 @@ if uploaded_file:
                             
                             Responda em português.
                             """
-                            # NOVA CHAMADA DE GERAÇÃO
                             response = client.models.generate_content(
                                 model="gemini-1.5-flash",
                                 contents=prompt
