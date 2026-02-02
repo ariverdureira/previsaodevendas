@@ -7,7 +7,7 @@ import requests
 import holidays
 import traceback
 import re
-import google.generativeai as genai
+from google import genai  # <--- NOVA BIBLIOTECA
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
@@ -156,7 +156,7 @@ def generate_features(df):
     d['roll_7'] = d.groupby('SKU')['Orders'].shift(1).rolling(7).mean()
     return d
 
-# --- 4. MOTOR DE PREVISÃO (Modificado para retornar clima) ---
+# --- 4. MOTOR DE PREVISÃO ---
 
 def run_forecast(df_raw, days_ahead=14):
     df_train_base = filter_history_vero(df_raw)
@@ -170,12 +170,10 @@ def run_forecast(df_raw, days_ahead=14):
     # --- CLIMA ---
     weather = get_live_forecast(days=days_ahead)
     
-    # Prepara dados de clima futuro para retornar depois
     weather_future = pd.DataFrame()
     if weather is not None:
         weather_future = weather[(weather['Date'] > last_date) & (weather['Date'] <= last_date + timedelta(days=days_ahead))].copy()
     
-    # Dados sintéticos de fallback
     np.random.seed(42)
     df_dates['Temp_Avg'] = np.random.normal(25, 3, len(df_dates))
     is_summer = df_dates['Date'].dt.month.isin([1, 2, 3, 12])
@@ -207,7 +205,7 @@ def run_forecast(df_raw, days_ahead=14):
     
     if train_data.empty:
         st.error("Erro: Dados insuficientes.")
-        return pd.DataFrame(), pd.DataFrame() # Retorna dois DFs vazios em caso de erro
+        return pd.DataFrame(), pd.DataFrame()
         
     features = ['DayOfWeek','IsWeekend','IsHoliday','Temp_Avg','Rain_mm','lag_1','lag_7','roll_7']
     model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1)
@@ -243,11 +241,10 @@ def run_forecast(df_raw, days_ahead=14):
         current_df = pd.concat([current_df, row_pred], sort=False)
         progress_bar.progress(i / days_ahead)
         
-    # RETORNA A PREVISÃO E O CLIMA FUTURO USADO
     return pd.concat(preds), weather_future
 # --- 5. INTERFACE DO USUÁRIO ---
 
-# Estilo para centralizar título e ajustar cor (Verde Neon Verdureira)
+# Estilo para centralizar título e ajustar cor
 st.markdown("""
     <style>
         .title-text {
@@ -264,11 +261,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CABEÇALHO COM LOGO (ALTERADO PARA JPG) ---
+# --- CABEÇALHO COM LOGO ---
 c1, c2, c3 = st.columns([1, 2, 1])
 with c2:
     try:
-        # MUDANÇA AQUI: Extensão .jpg
         st.image("AF-VERDUREIRA-LOGO-HORIZONTAL-07.jpg", use_container_width=True)
     except:
         st.warning("⚠️ Logo (JPG) não encontrada.")
@@ -300,12 +296,10 @@ if uploaded_file:
         if processar:
             with st.spinner("Calculando previsão (e obtendo clima)..."):
                 try:
-                    # MUDANÇA AQUI: Recebe a previsão E o clima
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=14)
                     
                     if not forecast_result.empty:
                         st.session_state['forecast_data'] = forecast_result
-                        # Salva o clima na memória também
                         st.session_state['weather_data'] = weather_result
                         st.session_state['has_run'] = True
                 except Exception as e:
@@ -315,16 +309,14 @@ if uploaded_file:
         # Se já rodou, exibe resultados
         if st.session_state.get('has_run', False):
             forecast = st.session_state['forecast_data']
-            # Recupera o clima da memória
             weather_df = st.session_state.get('weather_data', pd.DataFrame())
             
-            # --- NOVO BLOCO: PREVISÃO DO TEMPO (7 DIAS) ---
+            # --- BLOCO: PREVISÃO DO TEMPO ---
             if not weather_df.empty:
                 st.divider()
                 st.subheader("🌤️ Previsão do Tempo (Próximos 7 Dias)")
                 st.caption("Dados meteorológicos considerados no modelo.")
                 
-                # Pega os próximos 7 dias e formata para exibição
                 w_disp = weather_df.head(7).copy()
                 w_disp['Date'] = w_disp['Date'].dt.strftime('%d/%m')
                 w_disp = w_disp.rename(columns={
@@ -332,12 +324,10 @@ if uploaded_file:
                     'Temp_Avg': 'Temp. Média (°C)', 
                     'Rain_mm': 'Chuva (mm)'
                 })
-                # Formatação numérica bonita
                 w_disp['Temp. Média (°C)'] = w_disp['Temp. Média (°C)'].map('{:.1f}'.format)
                 w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
                 
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
-            # ----------------------------------------------
 
             # --- CÁLCULO DE RESUMOS (ANUAL) ---
             f_start = max_date + timedelta(days=1)
@@ -422,7 +412,7 @@ if uploaded_file:
             csv = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
 
-            # --- IA GEMINI ---
+            # --- IA GEMINI (NOVA BIBLIOTECA GOOGLE-GENAI) ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -430,27 +420,10 @@ if uploaded_file:
             
             if api_key:
                 try:
-                    genai.configure(api_key=api_key)
+                    # NOVA FORMA DE CONEXÃO: Criação do Client
+                    client = genai.Client(api_key=api_key)
                     
-                    available_models = []
-                    try:
-                        for m in genai.list_models():
-                            if 'generateContent' in m.supported_generation_methods:
-                                available_models.append(m.name)
-                    except: pass
-
-                    model_name = 'gemini-1.5-flash'
-                    if available_models:
-                        if any('flash' in m for m in available_models):
-                            model_name = next(m for m in available_models if 'flash' in m)
-                        elif any('pro' in m for m in available_models):
-                            model_name = next(m for m in available_models if 'pro' in m)
-                        else:
-                            model_name = available_models[0]
-                    
-                    model = genai.GenerativeModel(model_name)
-                    
-                    # Preparação Dados IA
+                    # Preparação Dados
                     tabela_anual_str = df_summary.to_string(index=False)
 
                     dt_cut = max_date - timedelta(days=60)
@@ -472,7 +445,7 @@ if uploaded_file:
                     
                     top_sku = forecast.groupby('Description')['Orders'].sum().nlargest(5).to_string()
                     
-                    st.info(f"Modelo: {model_name}. Dados: Comparativo Anual + Ritmo Diário.")
+                    st.info("Conectado via nova biblioteca (google-genai).")
                     query = st.text_area("Pergunta:", key="gemini_query")
                     
                     if st.button("Consultar IA"):
@@ -493,7 +466,11 @@ if uploaded_file:
                             
                             Responda em português.
                             """
-                            response = model.generate_content(prompt)
+                            # NOVA CHAMADA DE GERAÇÃO
+                            response = client.models.generate_content(
+                                model="gemini-1.5-flash",
+                                contents=prompt
+                            )
                             st.markdown(response.text)
                             
                 except Exception as e:
