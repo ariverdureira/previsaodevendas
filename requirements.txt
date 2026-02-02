@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 xgboost
-plotly
-openpyxl
+holidays
 requests
-scikit-learn
+google-generativeai
+openpyxl
