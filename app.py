@@ -384,21 +384,18 @@ if uploaded_file:
                 w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
             
-            # --- 2. RESUMO EXECUTIVO (COM AUDITORIA DE DATAS) ---
+            # --- 2. RESUMO EXECUTIVO ---
             st.divider()
             st.subheader("📊 Resumo Executivo")
             
-            # Definição das datas
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=7)
             
-            # Lógica Comercial (52 semanas = Mesmo Dia da Semana)
             ly_start = f_start - timedelta(weeks=52)
             ly_end = f_end - timedelta(weeks=52)
             l2y_start = f_start - timedelta(weeks=104)
             l2y_end = f_end - timedelta(weeks=104)
             
-            # Formatação para exibição na tabela (AUDITORIA)
             str_ly = f"2025 ({ly_start.strftime('%d/%m')} a {ly_end.strftime('%d/%m')})"
             str_2y = f"2024 ({l2y_start.strftime('%d/%m')} a {l2y_end.strftime('%d/%m')})"
             
@@ -419,9 +416,9 @@ if uploaded_file:
                 summary.append({
                     'Grupo': g,
                     'Previsão 7d': int(v_curr),
-                    str_ly: int(v_ly),          # Nome da coluna dinâmico
+                    str_ly: int(v_ly),
                     'Var % (vs 25)': f"{p_ly:+.1f}%",
-                    str_2y: int(v_2y),          # Nome da coluna dinâmico
+                    str_2y: int(v_2y),
                     'Var % (vs 24)': f"{p_2y:+.1f}%"
                 })
             
@@ -491,11 +488,13 @@ if uploaded_file:
                         else: cols_mrp.append(c)
                     df_purchasing.columns = cols_mrp
                     
-                    st.dataframe(df_purchasing.style.format("{:.1f}"), use_container_width=True)
+                    # CORREÇÃO DE FORMATAÇÃO E NOMENCLATURA
+                    numeric_cols = df_purchasing.select_dtypes(include=[np.number]).columns
+                    st.dataframe(df_purchasing.style.format("{:.1f}", subset=numeric_cols), use_container_width=True)
                     
-                    # BOTÃO 2
+                    # BOTÃO 2 - NOMENCLATURA AJUSTADA
                     csv_mrp = df_purchasing.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 2. Baixar Lista de Compras Fábrica (CSV)", csv_mrp, "lista_compras_materiaprima.csv", "text/csv")
+                    st.download_button("📥 2. Baixar Necessidade de Matéria Prima (CSV)", csv_mrp, "necessidade_materia_prima.csv", "text/csv")
                 else:
                     st.warning("⚠️ Erro na leitura da Ficha Técnica.")
 
