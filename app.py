@@ -176,6 +176,13 @@ def load_recipe_data(uploaded_file):
         st.error(f"Erro ao ler Ficha Técnica: {e}")
         return pd.DataFrame()
 
+def extract_weight_from_sku(text):
+    """Extrai peso em gramas do texto (ex: '500G' -> 500.0)"""
+    match = re.search(r'(\d+)\s*[gG]', str(text))
+    if match:
+        return float(match.group(1))
+    return 0.0
+
 # ==============================================================================
 # 2. MOTOR DE CÁLCULO
 # ==============================================================================
@@ -467,6 +474,27 @@ if uploaded_file:
                 df_recipe = load_recipe_data(uploaded_recipe)
                 
                 if not df_recipe.empty:
+                    # --- ANÁLISE DE SOBREMASSA (>5%) ---
+                    df_check = df_recipe.copy()
+                    df_check['Label_Weight'] = df_check['SKU'].apply(extract_weight_from_sku)
+                    
+                    # Agrupa por SKU para somar o peso da receita (em caso de mix)
+                    df_check_grouped = df_check.groupby(['SKU', 'Label_Weight'])['Weight_g'].sum().reset_index()
+                    
+                    # Calcula divergência
+                    df_check_grouped['Diff_Pct'] = ((df_check_grouped['Weight_g'] - df_check_grouped['Label_Weight']) / df_check_grouped['Label_Weight']) * 100
+                    df_check_grouped = df_check_grouped.fillna(0) # Evita div/0
+                    
+                    # Filtra problemas (> 5%)
+                    alerts = df_check_grouped[df_check_grouped['Diff_Pct'] > 5.0].sort_values('Diff_Pct', ascending=False)
+                    
+                    if not alerts.empty:
+                        with st.expander("⚠️ Atenção: Discrepâncias de Peso Detectadas (Sobremassa > 5%)", expanded=True):
+                            st.write("Os seguintes produtos consomem significativamente mais matéria-prima do que o peso nominal da embalagem:")
+                            for index, row in alerts.iterrows():
+                                st.warning(f"🔴 **{row['SKU']}**: Embalagem {row['Label_Weight']:.0f}g vs Receita {row['Weight_g']:.0f}g (+{row['Diff_Pct']:.1f}%)")
+                    
+                    # --- Lógica de Cálculo ---
                     if 'Type' in df_recipe.columns:
                         mask_legume = df_recipe['Type'].astype(str).str.contains('Legume', case=False, na=False)
                         df_recipe = df_recipe[~mask_legume]
@@ -488,11 +516,11 @@ if uploaded_file:
                         else: cols_mrp.append(c)
                     df_purchasing.columns = cols_mrp
                     
-                    # CORREÇÃO DE FORMATAÇÃO E NOMENCLATURA
+                    # Formatação
                     numeric_cols = df_purchasing.select_dtypes(include=[np.number]).columns
                     st.dataframe(df_purchasing.style.format("{:.1f}", subset=numeric_cols), use_container_width=True)
                     
-                    # BOTÃO 2 - NOMENCLATURA AJUSTADA
+                    # BOTÃO 2
                     csv_mrp = df_purchasing.to_csv(index=False).encode('utf-8')
                     st.download_button("📥 2. Baixar Necessidade de Matéria Prima (CSV)", csv_mrp, "necessidade_materia_prima.csv", "text/csv")
                 else:
