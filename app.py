@@ -481,9 +481,12 @@ if uploaded_file:
                     # Agrupa por SKU para somar o peso da receita (em caso de mix)
                     df_check_grouped = df_check.groupby(['SKU', 'Label_Weight'])['Weight_g'].sum().reset_index()
                     
+                    # FILTRO NOVO: Ignora produtos sem peso declarado no nome (Label_Weight = 0)
+                    df_check_grouped = df_check_grouped[df_check_grouped['Label_Weight'] > 0]
+                    
                     # Calcula divergência
                     df_check_grouped['Diff_Pct'] = ((df_check_grouped['Weight_g'] - df_check_grouped['Label_Weight']) / df_check_grouped['Label_Weight']) * 100
-                    df_check_grouped = df_check_grouped.fillna(0) # Evita div/0
+                    df_check_grouped = df_check_grouped.fillna(0)
                     
                     # Filtra problemas (> 5%)
                     alerts = df_check_grouped[df_check_grouped['Diff_Pct'] > 5.0].sort_values('Diff_Pct', ascending=False)
