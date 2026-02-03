@@ -8,26 +8,88 @@ import holidays
 import traceback
 import re
 from google import genai
+from sklearn.metrics import mean_absolute_error
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
 
 # ==============================================================================
-# 1. FUNÇÕES AUXILIARES E DE CARGA
+# 1. FUNÇÕES AUXILIARES E CALENDÁRIO INTELIGENTE
 # ==============================================================================
 
 def get_holidays_calendar(start_date, end_date):
+    """
+    Gera calendário contendo:
+    1. Feriados Nacionais (SP)
+    2. Datas Comemorativas Móveis (Dia das Mães, Pais)
+    3. Flag de 'Alto Impacto' para datas de muito consumo
+    """
     try:
+        # 1. Feriados Oficiais
         br_holidays = holidays.Brazil(subdiv='SP', state='SP')
-        date_range = pd.date_range(start_date, end_date)
+        
+        # Datas de Alto Impacto (Fixo)
+        high_impact_fixed = {
+            (12, 25): "Natal",
+            (1, 1): "Ano Novo"
+        }
+        
         data = []
+        # Garante iteração por todos os anos do range
+        years = list(range(start_date.year, end_date.year + 1))
+        
+        # 2. Calcula Datas Móveis (Mães e Pais)
+        mothers_days = []
+        fathers_days = []
+        
+        for year in years:
+            # Dia das Mães: 2º Domingo de Maio
+            may_sundays = pd.date_range(start=f'{year}-05-01', end=f'{year}-05-31', freq='W-SUN')
+            if len(may_sundays) >= 2:
+                mothers_days.append(may_sundays[1].date())
+            
+            # Dia dos Pais: 2º Domingo de Agosto
+            aug_sundays = pd.date_range(start=f'{year}-08-01', end=f'{year}-08-31', freq='W-SUN')
+            if len(aug_sundays) >= 2:
+                fathers_days.append(aug_sundays[1].date())
+
+        # Gera o DataFrame dia a dia
+        date_range = pd.date_range(start_date, end_date)
+        
         for d in date_range:
-            is_hol = 1 if d in br_holidays else 0
-            data.append({'Date': d, 'IsHoliday': is_hol})
+            d_date = d.date()
+            is_hol = 0
+            is_high = 0
+            
+            # Verifica Feriado Oficial
+            if d_date in br_holidays:
+                is_hol = 1
+                # Se for Natal ou Ano Novo, é Alto Impacto
+                if (d.month, d.day) in high_impact_fixed:
+                    is_high = 1
+            
+            # Verifica Mães e Pais (Alto Impacto)
+            if d_date in mothers_days or d_date in fathers_days:
+                is_hol = 1 # Consideramos como feriado/evento
+                is_high = 1 # E de alto impacto
+            
+            # Verifica Páscoa (Aproximação via feriados cristãos se disponível ou lógica manual)
+            # A lib holidays geralmente traz 'Sexta-feira Santa' e 'Corpus Christi'
+            # Vamos considerar Sexta-Santa como gatilho de alto impacto também
+            if d_date in br_holidays and br_holidays.get(d_date) == "Sexta-feira Santa":
+                 is_high = 1
+
+            data.append({
+                'Date': d, 
+                'IsHoliday': is_hol,
+                'IsHighImpact': is_high
+            })
+            
         return pd.DataFrame(data)
     except:
+        # Fallback seguro
         d_range = pd.date_range(start_date, end_date)
-        return pd.DataFrame({'Date': d_range, 'IsHoliday': 0})
+        return pd.DataFrame({'Date': d_range, 'IsHoliday': 0, 'IsHighImpact': 0})
 
 def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
     try:
@@ -39,7 +101,7 @@ def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
             "timezone": "America/Sao_Paulo", 
             "forecast_days": days + 2
         }
-        r = requests.get(url, params=params, timeout=5).json() # Timeout adicionado
+        r = requests.get(url, params=params, timeout=5).json()
         
         dates = pd.to_datetime(r['daily']['time'])
         t_max = np.array(r['daily']['temperature_2m_max'])
@@ -121,7 +183,7 @@ def load_data(uploaded_file):
         return pd.DataFrame()
 
 # ==============================================================================
-# 2. MOTOR DE PREVISÃO
+# 2. ENGENHARIA DE FEATURES
 # ==============================================================================
 
 def filter_history_vero(df):
@@ -149,14 +211,25 @@ def clean_outliers(df):
 
 def generate_features(df):
     d = df.sort_values(['SKU', 'Date']).copy()
+    
     d['DayOfWeek'] = d['Date'].dt.dayofweek
     d['IsWeekend'] = (d['DayOfWeek'] >= 5).astype(int)
     
+    # Efeito Pagamento (Sazonalidade Mensal)
+    d['DayOfMonth'] = d['Date'].dt.day
+    d['IsPaydayWeek'] = d['DayOfMonth'].between(5, 10).astype(int)
+    
+    # Lags
     d['lag_1'] = d.groupby('SKU')['Orders'].shift(1)
     d['lag_7'] = d.groupby('SKU')['Orders'].shift(7)
     d['lag_14'] = d.groupby('SKU')['Orders'].shift(14)
     d['roll_7'] = d.groupby('SKU')['Orders'].shift(1).rolling(7).mean()
+    
     return d
+
+# ==============================================================================
+# 3. MOTOR DE PREVISÃO
+# ==============================================================================
 
 def run_forecast(df_raw, days_ahead=14):
     df_train_base = filter_history_vero(df_raw)
@@ -167,16 +240,15 @@ def run_forecast(df_raw, days_ahead=14):
     future_range = pd.date_range(start_date, last_date + timedelta(days=days_ahead))
     df_dates = pd.DataFrame({'Date': future_range})
     
-    # --- LÓGICA DE CLIMA ROBUSTA ---
+    # --- CLIMA ---
     weather = get_live_forecast(days=days_ahead)
     
-    # Gera dados sintéticos (padrão sazonal) como base
+    # Fallback Sintético
     np.random.seed(42)
     df_dates['Temp_Avg'] = np.random.normal(25, 3, len(df_dates))
     is_summer = df_dates['Date'].dt.month.isin([1, 2, 3, 12])
     df_dates['Rain_mm'] = np.where(is_summer, np.random.exponential(8, len(df_dates)), 4)
     
-    # Se a API funcionar, sobrescreve com dados reais
     if weather is not None:
         weather['Date'] = pd.to_datetime(weather['Date'])
         df_dates = pd.merge(df_dates, weather, on='Date', how='left', suffixes=('', '_real'))
@@ -184,17 +256,22 @@ def run_forecast(df_raw, days_ahead=14):
         df_dates['Rain_mm'] = df_dates['Rain_mm_real'].fillna(df_dates['Rain_mm'])
         df_dates = df_dates[['Date', 'Temp_Avg', 'Rain_mm']]
     
-    # CORREÇÃO: Garante que weather_future SEMPRE tenha dados (Reais ou Estimados)
     weather_future = df_dates[
         (df_dates['Date'] > last_date) & 
         (df_dates['Date'] <= last_date + timedelta(days=days_ahead))
     ][['Date', 'Temp_Avg', 'Rain_mm']].copy()
     
-    # Continua com Feriados e Merge...
+    # --- FERIADOS E EVENTOS ESPECIAIS ---
     holidays_df = get_holidays_calendar(df_dates['Date'].min(), df_dates['Date'].max())
     df_dates = pd.merge(df_dates, holidays_df, on='Date', how='left')
     df_dates['IsHoliday'] = df_dates['IsHoliday'].fillna(0)
+    df_dates['IsHighImpact'] = df_dates['IsHighImpact'].fillna(0)
     
+    # --- VÉSPERA DE IMPACTO (O "Pulo do Gato") ---
+    # Se amanhã é dia de Alto Impacto (Mães, Natal), hoje ganha flag 1
+    df_dates['IsHighImpactNextDay'] = df_dates['IsHighImpact'].shift(-1).fillna(0)
+    
+    # --- MERGE ---
     unique_skus = df_train_base[['SKU', 'Description', 'Group']].drop_duplicates()
     unique_skus['key'] = 1
     df_dates['key'] = 1
@@ -206,15 +283,64 @@ def run_forecast(df_raw, days_ahead=14):
     df_master.loc[mask_past, 'Orders'] = df_master.loc[mask_past, 'Orders'].fillna(0)
     
     df_feat = generate_features(df_master)
-    train_data = df_feat[df_feat['Date'] <= last_date].dropna()
     
-    if train_data.empty:
+    # Features atualizadas para incluir a Véspera de Alto Impacto
+    features = [
+        'DayOfWeek', 'IsWeekend', 
+        'IsHoliday', 'IsHighImpact', 'IsHighImpactNextDay', # <--- Novas Flags
+        'DayOfMonth', 'IsPaydayWeek', 
+        'Temp_Avg', 'Rain_mm', 
+        'lag_1', 'lag_7', 'roll_7'
+    ]
+    
+    train_full = df_feat[df_feat['Date'] <= last_date].dropna()
+    
+    if train_full.empty:
         return pd.DataFrame(), pd.DataFrame()
-        
-    features = ['DayOfWeek','IsWeekend','IsHoliday','Temp_Avg','Rain_mm','lag_1','lag_7','roll_7']
-    model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1)
-    model.fit(train_data[features], train_data['Orders'])
+
+    # --- MINI AUTO-ML ---
+    split_date = last_date - timedelta(days=14)
+    X_train_sub = train_full[train_full['Date'] <= split_date]
+    X_val_sub = train_full[train_full['Date'] > split_date]
     
+    best_params = {'n_estimators': 300, 'learning_rate': 0.03, 'max_depth': 6}
+    
+    if not X_train_sub.empty and not X_val_sub.empty:
+        configs = [
+            {'name': 'Rápido', 'n_estimators': 150, 'learning_rate': 0.05, 'max_depth': 5},
+            {'name': 'Profundo', 'n_estimators': 400, 'learning_rate': 0.02, 'max_depth': 7},
+            {'name': 'Padrão', 'n_estimators': 300, 'learning_rate': 0.03, 'max_depth': 6}
+        ]
+        
+        best_mae = float('inf')
+        
+        for cfg in configs:
+            try:
+                m = XGBRegressor(
+                    n_estimators=cfg['n_estimators'], 
+                    learning_rate=cfg['learning_rate'], 
+                    max_depth=cfg['max_depth'], 
+                    n_jobs=-1
+                )
+                m.fit(X_train_sub[features], X_train_sub['Orders'])
+                val_preds = m.predict(X_val_sub[features])
+                mae = mean_absolute_error(X_val_sub['Orders'], val_preds)
+                
+                if mae < best_mae:
+                    best_mae = mae
+                    best_params = cfg
+            except: continue
+        print(f"Config Vencedora: {best_params.get('name')}")
+
+    model = XGBRegressor(
+        n_estimators=best_params['n_estimators'], 
+        learning_rate=best_params['learning_rate'], 
+        max_depth=best_params['max_depth'], 
+        n_jobs=-1
+    )
+    model.fit(train_full[features], train_full['Orders'])
+    
+    # --- LOOP DE PREVISÃO ---
     preds = []
     current_df = df_master[df_master['Date'] <= last_date].copy()
     progress_bar = st.progress(0)
@@ -222,7 +348,8 @@ def run_forecast(df_raw, days_ahead=14):
     for i in range(1, days_ahead + 1):
         next_day = last_date + timedelta(days=i)
         
-        cols_static = ['Date','SKU','Description','Group','Temp_Avg','Rain_mm','IsHoliday']
+        cols_static = ['Date','SKU','Description','Group','Temp_Avg','Rain_mm',
+                       'IsHoliday','IsHighImpact','IsHighImpactNextDay']
         next_base = df_master[df_master['Date'] == next_day][cols_static].copy()
         
         temp_full = pd.concat([current_df, next_base], sort=False)
@@ -236,9 +363,9 @@ def run_forecast(df_raw, days_ahead=14):
         row_pred['Orders'] = np.maximum(np.round(y_pred, 0), 0)
         
         is_sunday = next_day.dayofweek == 6
-        is_holiday = row_pred['IsHoliday'].values[0] == 1
+        is_holiday_today = row_pred['IsHoliday'].values[0] == 1
         
-        if is_sunday or is_holiday:
+        if is_sunday or is_holiday_today:
             row_pred['Orders'] = 0
             
         preds.append(row_pred)
@@ -248,10 +375,9 @@ def run_forecast(df_raw, days_ahead=14):
     return pd.concat(preds), weather_future
 
 # ==============================================================================
-# 3. INTERFACE VISUAL
+# 4. INTERFACE VISUAL
 # ==============================================================================
 
-# Estilo
 st.markdown("""
     <style>
         .title-text {
@@ -268,7 +394,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Cabeçalho
 c1, c2, c3 = st.columns([1, 2, 1])
 with c2:
     try:
@@ -278,7 +403,6 @@ with c2:
 
 st.markdown('<h1 class="title-text">PCP - Previsão de Vendas</h1>', unsafe_allow_html=True)
 
-# Lógica
 uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
 
 if 'last_file' not in st.session_state: st.session_state.last_file = None
@@ -297,9 +421,10 @@ if uploaded_file:
             processar = st.button("🚀 Gerar Previsão", use_container_width=True)
 
         if processar:
-            with st.spinner("Calculando previsão..."):
+            with st.spinner("Analisando Feriados, Clima e Sazonalidade..."):
                 try:
-                    forecast_result, weather_result = run_forecast(df_raw, days_ahead=14)
+                    # HORIZONTE 7 DIAS (Mais Seguro para Perecíveis)
+                    forecast_result, weather_result = run_forecast(df_raw, days_ahead=7)
                     
                     if not forecast_result.empty:
                         st.session_state['forecast_data'] = forecast_result
@@ -317,7 +442,7 @@ if uploaded_file:
             if not weather_df.empty:
                 st.divider()
                 st.subheader("🌤️ Previsão do Tempo (Próximos 7 Dias)")
-                st.caption("Dados meteorológicos considerados no modelo.")
+                st.caption("Dados meteorológicos utilizados pelo modelo.")
                 
                 w_disp = weather_df.head(7).copy()
                 w_disp['Date'] = w_disp['Date'].dt.strftime('%d/%m')
@@ -331,14 +456,14 @@ if uploaded_file:
                 
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
             else:
-                st.warning("⚠️ Dados climáticos não disponíveis.")
+                st.warning("⚠️ Dados climáticos estimados (API indisponível).")
             
             # --- 2. RESUMO EXECUTIVO ---
             f_start = max_date + timedelta(days=1)
             ly_start = f_start - timedelta(weeks=52)
-            ly_end = ly_start + timedelta(days=13)
+            ly_end = ly_start + timedelta(days=6) # Ajustado para 7d
             l2y_start = f_start - timedelta(weeks=104)
-            l2y_end = l2y_start + timedelta(days=13)
+            l2y_end = l2y_start + timedelta(days=6) # Ajustado para 7d
             
             hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
             hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
@@ -356,7 +481,7 @@ if uploaded_file:
                 
                 summary.append({
                     'Grupo': g,
-                    'Previsão 14d': int(v_curr),
+                    'Previsão 7d': int(v_curr),
                     '2025 (Mesmo Período)': int(v_ly),
                     'Var % (vs 25)': f"{p_ly:+.1f}%",
                     '2024 (Mesmo Período)': int(v_2y),
@@ -372,7 +497,7 @@ if uploaded_file:
             
             summary.append({
                 'Grupo': 'TOTAL GERAL',
-                'Previsão 14d': int(tot_cur),
+                'Previsão 7d': int(tot_cur),
                 '2025 (Mesmo Período)': int(tot_ly),
                 'Var % (vs 25)': f"{pt_ly:+.1f}%",
                 '2024 (Mesmo Período)': int(tot_2y),
@@ -412,7 +537,7 @@ if uploaded_file:
             st.write("### 🗓️ Previsão Detalhada")
             st.dataframe(df_piv, use_container_width=True)
             
-            # --- DOWNLOAD COM NOME DINÂMICO ---
+            # --- DOWNLOAD ---
             d_inicial = forecast['Date'].min().strftime('%d-%m-%Y')
             d_final = forecast['Date'].max().strftime('%d-%m-%Y')
             nome_arquivo = f"Previsao_{d_inicial}_a_{d_final}.csv"
@@ -438,15 +563,15 @@ if uploaded_file:
                     days_hist = max(days_hist, 1)
                     
                     media_hist = df_h_recent.groupby('Group')['Orders'].sum() / days_hist
-                    days_fore = 14
+                    days_fore = 7
                     media_fore = forecast.groupby('Group')['Orders'].sum() / days_fore
                     
                     df_ritmo = pd.DataFrame({
                         'Média Diária (Últimos 60d)': media_hist,
-                        'Média Diária (Prevista 14d)': media_fore
+                        'Média Diária (Prevista 7d)': media_fore
                     })
                     
-                    df_ritmo['Aceleração de Vendas (%)'] = ((df_ritmo['Média Diária (Prevista 14d)'] / df_ritmo['Média Diária (Últimos 60d)']) - 1) * 100
+                    df_ritmo['Aceleração de Vendas (%)'] = ((df_ritmo['Média Diária (Prevista 7d)'] / df_ritmo['Média Diária (Últimos 60d)']) - 1) * 100
                     tabela_ritmo_str = df_ritmo.round(1).to_string()
                     
                     top_sku = forecast.groupby('Description')['Orders'].sum().nlargest(5).to_string()
