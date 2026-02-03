@@ -35,7 +35,6 @@ def get_holidays_calendar(start_date, end_date):
         }
         
         data = []
-        # Garante iteração por todos os anos do range
         years = list(range(start_date.year, end_date.year + 1))
         
         # 2. Calcula Datas Móveis (Mães e Pais)
@@ -53,7 +52,6 @@ def get_holidays_calendar(start_date, end_date):
             if len(aug_sundays) >= 2:
                 fathers_days.append(aug_sundays[1].date())
 
-        # Gera o DataFrame dia a dia
         date_range = pd.date_range(start_date, end_date)
         
         for d in date_range:
@@ -64,18 +62,15 @@ def get_holidays_calendar(start_date, end_date):
             # Verifica Feriado Oficial
             if d_date in br_holidays:
                 is_hol = 1
-                # Se for Natal ou Ano Novo, é Alto Impacto
                 if (d.month, d.day) in high_impact_fixed:
                     is_high = 1
             
             # Verifica Mães e Pais (Alto Impacto)
             if d_date in mothers_days or d_date in fathers_days:
-                is_hol = 1 # Consideramos como feriado/evento
-                is_high = 1 # E de alto impacto
+                is_hol = 1 
+                is_high = 1 
             
-            # Verifica Páscoa (Aproximação via feriados cristãos se disponível ou lógica manual)
-            # A lib holidays geralmente traz 'Sexta-feira Santa' e 'Corpus Christi'
-            # Vamos considerar Sexta-Santa como gatilho de alto impacto também
+            # Sexta-feira Santa
             if d_date in br_holidays and br_holidays.get(d_date) == "Sexta-feira Santa":
                  is_high = 1
 
@@ -87,7 +82,6 @@ def get_holidays_calendar(start_date, end_date):
             
         return pd.DataFrame(data)
     except:
-        # Fallback seguro
         d_range = pd.date_range(start_date, end_date)
         return pd.DataFrame({'Date': d_range, 'IsHoliday': 0, 'IsHighImpact': 0})
 
@@ -187,14 +181,22 @@ def load_data(uploaded_file):
 # ==============================================================================
 
 def filter_history_vero(df):
+    """Mantém a regra de só olhar VERO a partir de 2025 (Novo Normal)"""
     mask_vero = df['Group'] == 'Vero'
     mask_date = df['Date'] >= '2025-01-01'
     keep = (mask_vero & mask_date) | (~mask_vero)
     return df[keep].copy()
 
 def clean_outliers(df):
+    """
+    Remove picos absurdos (erros), MAS AGORA IGNORA A VERO.
+    Vero foi removida da lista 'targets' para aceitar o crescimento agressivo.
+    """
     df = df.sort_values(['SKU', 'Date'])
-    targets = ['Vero', 'Americana Bola']
+    
+    # ALTERAÇÃO AQUI: Removemos 'Vero' desta lista.
+    targets = ['Americana Bola'] 
+    
     skus_to_check = df[df['Group'].isin(targets)]['SKU'].unique()
     
     for sku in skus_to_check:
@@ -215,7 +217,7 @@ def generate_features(df):
     d['DayOfWeek'] = d['Date'].dt.dayofweek
     d['IsWeekend'] = (d['DayOfWeek'] >= 5).astype(int)
     
-    # Efeito Pagamento (Sazonalidade Mensal)
+    # Efeito Pagamento
     d['DayOfMonth'] = d['Date'].dt.day
     d['IsPaydayWeek'] = d['DayOfMonth'].between(5, 10).astype(int)
     
@@ -267,8 +269,7 @@ def run_forecast(df_raw, days_ahead=14):
     df_dates['IsHoliday'] = df_dates['IsHoliday'].fillna(0)
     df_dates['IsHighImpact'] = df_dates['IsHighImpact'].fillna(0)
     
-    # --- VÉSPERA DE IMPACTO (O "Pulo do Gato") ---
-    # Se amanhã é dia de Alto Impacto (Mães, Natal), hoje ganha flag 1
+    # --- VÉSPERA DE IMPACTO ---
     df_dates['IsHighImpactNextDay'] = df_dates['IsHighImpact'].shift(-1).fillna(0)
     
     # --- MERGE ---
@@ -284,10 +285,9 @@ def run_forecast(df_raw, days_ahead=14):
     
     df_feat = generate_features(df_master)
     
-    # Features atualizadas para incluir a Véspera de Alto Impacto
     features = [
         'DayOfWeek', 'IsWeekend', 
-        'IsHoliday', 'IsHighImpact', 'IsHighImpactNextDay', # <--- Novas Flags
+        'IsHoliday', 'IsHighImpact', 'IsHighImpactNextDay',
         'DayOfMonth', 'IsPaydayWeek', 
         'Temp_Avg', 'Rain_mm', 
         'lag_1', 'lag_7', 'roll_7'
@@ -423,7 +423,7 @@ if uploaded_file:
         if processar:
             with st.spinner("Analisando Feriados, Clima e Sazonalidade..."):
                 try:
-                    # HORIZONTE 7 DIAS (Mais Seguro para Perecíveis)
+                    # HORIZONTE 7 DIAS
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=7)
                     
                     if not forecast_result.empty:
@@ -461,9 +461,9 @@ if uploaded_file:
             # --- 2. RESUMO EXECUTIVO ---
             f_start = max_date + timedelta(days=1)
             ly_start = f_start - timedelta(weeks=52)
-            ly_end = ly_start + timedelta(days=6) # Ajustado para 7d
+            ly_end = ly_start + timedelta(days=6)
             l2y_start = f_start - timedelta(weeks=104)
-            l2y_end = l2y_start + timedelta(days=6) # Ajustado para 7d
+            l2y_end = l2y_start + timedelta(days=6)
             
             hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
             hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
