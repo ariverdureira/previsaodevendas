@@ -7,7 +7,7 @@ import requests
 import holidays
 import traceback
 import re
-from google import genai  # <--- NOVA BIBLIOTECA
+from google import genai
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
@@ -232,6 +232,7 @@ def run_forecast(df_raw, days_ahead=14):
         row_pred['Orders'] = np.maximum(np.round(y_pred, 0), 0)
         
         is_sunday = next_day.dayofweek == 6
+        # --- AQUI ESTAVA O ERRO ---
         is_holiday = row_pred['IsHoliday'].values[0] == 1
         
         if is_sunday or is_holiday:
@@ -244,7 +245,7 @@ def run_forecast(df_raw, days_ahead=14):
     return pd.concat(preds), weather_future
 # --- 5. INTERFACE DO USUÁRIO ---
 
-# Estilo para centralizar título e ajustar cor
+# Estilo visual
 st.markdown("""
     <style>
         .title-text {
@@ -261,7 +262,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CABEÇALHO COM LOGO ---
+# --- CABEÇALHO ---
 c1, c2, c3 = st.columns([1, 2, 1])
 with c2:
     try:
@@ -269,14 +270,12 @@ with c2:
     except:
         st.warning("⚠️ Logo (JPG) não encontrada.")
 
-# Título Customizado (HTML)
 st.markdown('<h1 class="title-text">PCP - Previsão de Vendas</h1>', unsafe_allow_html=True)
 
-# --- LÓGICA DO APP ---
+# --- LÓGICA ---
 
 uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
 
-# Limpa memória se trocar de arquivo
 if 'last_file' not in st.session_state: st.session_state.last_file = None
 if uploaded_file and uploaded_file != st.session_state.last_file:
     st.session_state.clear()
@@ -288,7 +287,7 @@ if uploaded_file:
     if not df_raw.empty:
         max_date = df_raw['Date'].max()
         
-        # Botão centralizado
+        # Botão de Processamento
         col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
         with col_btn2:
             processar = st.button("🚀 Gerar Previsão", use_container_width=True)
@@ -296,6 +295,7 @@ if uploaded_file:
         if processar:
             with st.spinner("Calculando previsão (e obtendo clima)..."):
                 try:
+                    # Chama a função da Parte 1 que retorna (Previsão, Clima)
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=14)
                     
                     if not forecast_result.empty:
@@ -306,12 +306,13 @@ if uploaded_file:
                     st.error(f"Erro no cálculo: {e}")
                     st.write(traceback.format_exc())
 
-        # Se já rodou, exibe resultados
+        # Exibição dos Resultados
         if st.session_state.get('has_run', False):
             forecast = st.session_state['forecast_data']
             weather_df = st.session_state.get('weather_data', pd.DataFrame())
             
-            # --- BLOCO: PREVISÃO DO TEMPO ---
+            # --- 1. BLOCO DE CLIMA (PRIORIDADE VISUAL) ---
+            # Garante que apareça antes do resumo
             if not weather_df.empty:
                 st.divider()
                 st.subheader("🌤️ Previsão do Tempo (Próximos 7 Dias)")
@@ -328,8 +329,8 @@ if uploaded_file:
                 w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
                 
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
-
-            # --- CÁLCULO DE RESUMOS (ANUAL) ---
+            
+            # --- 2. CÁLCULO DO RESUMO EXECUTIVO ---
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=14)
             
@@ -382,7 +383,7 @@ if uploaded_file:
             df_summary = pd.DataFrame(summary)
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
             
-            # --- TABELA DETALHADA (CORRIGIDA) ---
+            # --- 3. PREVISÃO DETALHADA ---
             df_piv = forecast.pivot_table(
                 index=['SKU', 'Description', 'Group'], 
                 columns='Date', 
@@ -390,19 +391,17 @@ if uploaded_file:
                 aggfunc='sum'
             ).reset_index()
             
-            # CORREÇÃO PANDAS: Calcula totais numéricos separadamente e converte para dict
+            # Totais
             num_cols = df_piv.select_dtypes(include=[np.number]).columns
             total_data = df_piv[num_cols].sum().to_dict()
-            
-            # Adiciona os textos na linha de total
             total_data['SKU'] = 'TOTAL'
             total_data['Description'] = 'TOTAL GERAL'
             total_data['Group'] = '-'
             
-            # Cria DataFrame da linha total e concatena (evita erro de dtype e warning Arrow)
             df_total = pd.DataFrame([total_data])
             df_piv = pd.concat([df_piv, df_total], ignore_index=True)
             
+            # Formata Colunas de Data
             cols_fmt = []
             for c in df_piv.columns:
                 if isinstance(c, pd.Timestamp):
@@ -414,10 +413,21 @@ if uploaded_file:
             st.write("### 🗓️ Previsão Detalhada")
             st.dataframe(df_piv, use_container_width=True)
             
+            # --- DOWNLOAD COM NOME DINÂMICO ---
+            # Pega data inicial e final da previsão para o nome do arquivo
+            d_inicial = forecast['Date'].min().strftime('%d-%m-%Y')
+            d_final = forecast['Date'].max().strftime('%d-%m-%Y')
+            nome_arquivo = f"Previsao_{d_inicial}_a_{d_final}.csv"
+            
             csv = df_piv.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar Planilha", csv, "previsao_final.csv", "text/csv")
+            st.download_button(
+                label="📥 Baixar Planilha", 
+                data=csv, 
+                file_name=nome_arquivo,  # <--- Nome alterado aqui
+                mime="text/csv"
+            )
 
-            # --- IA GEMINI ---
+            # --- 4. IA GEMINI ---
             st.divider()
             st.subheader("🤖 Analista IA")
             
@@ -425,7 +435,6 @@ if uploaded_file:
             
             if api_key:
                 try:
-                    # Conexão Client (Nova Lib)
                     client = genai.Client(api_key=api_key)
                     
                     tabela_anual_str = df_summary.to_string(index=False)
@@ -449,13 +458,13 @@ if uploaded_file:
                     
                     top_sku = forecast.groupby('Description')['Orders'].sum().nlargest(5).to_string()
                     
-                    st.info("Conectado via nova biblioteca (google-genai).")
+                    st.info("Conectado.")
                     query = st.text_area("Pergunta:", key="gemini_query")
                     
                     if st.button("Consultar IA"):
                         with st.spinner("Analisando..."):
                             prompt = f"""
-                            Você é um analista sênior de planejamento de demanda.
+                            Você é um analista sênior.
                             
                             TABELA 1: COMPARATIVO ANUAL (Volume Total)
                             {tabela_anual_str}
