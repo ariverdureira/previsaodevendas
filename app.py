@@ -21,38 +21,29 @@ def get_holidays_calendar(start_date, end_date):
     try:
         br_holidays = holidays.Brazil(subdiv='SP', state='SP')
         high_impact_fixed = {(12, 25): "Natal", (1, 1): "Ano Novo"}
-        
         data = []
         years = list(range(start_date.year, end_date.year + 1))
         mothers_days = []
         fathers_days = []
-        
         for year in years:
             may_sundays = pd.date_range(start=f'{year}-05-01', end=f'{year}-05-31', freq='W-SUN')
             if len(may_sundays) >= 2: mothers_days.append(may_sundays[1].date())
             aug_sundays = pd.date_range(start=f'{year}-08-01', end=f'{year}-08-31', freq='W-SUN')
             if len(aug_sundays) >= 2: fathers_days.append(aug_sundays[1].date())
-
         date_range = pd.date_range(start_date, end_date)
-        
         for d in date_range:
             d_date = d.date()
             is_hol = 0
             is_high = 0
-            
             if d_date in br_holidays:
                 is_hol = 1
                 if (d.month, d.day) in high_impact_fixed: is_high = 1
-            
             if d_date in mothers_days or d_date in fathers_days:
                 is_hol = 1 
                 is_high = 1 
-            
             if d_date in br_holidays and br_holidays.get(d_date) == "Sexta-feira Santa":
                  is_high = 1
-
             data.append({'Date': d, 'IsHoliday': is_hol, 'IsHighImpact': is_high})
-            
         return pd.DataFrame(data)
     except:
         d_range = pd.date_range(start_date, end_date)
@@ -64,7 +55,6 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
         today = pd.Timestamp.now().normalize()
         hist_end = min(end_date, today - timedelta(days=2))
         df_hist = pd.DataFrame()
-        
         if start_date < hist_end:
             url_hist = "https://archive-api.open-meteo.com/v1/archive"
             params_hist = {
@@ -79,7 +69,6 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
                 dates = pd.to_datetime(r_hist['daily']['time'])
                 t_avg = (np.array(r_hist['daily']['temperature_2m_max']) + np.array(r_hist['daily']['temperature_2m_min'])) / 2
                 df_hist = pd.DataFrame({'Date': dates, 'Temp_Avg': t_avg, 'Rain_mm': r_hist['daily']['precipitation_sum']})
-
         df_fore = pd.DataFrame()
         if end_date >= today:
             url_fore = "https://api.open-meteo.com/v1/forecast"
@@ -94,7 +83,6 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
                 dates = pd.to_datetime(r_fore['daily']['time'])
                 t_avg = (np.array(r_fore['daily']['temperature_2m_max']) + np.array(r_fore['daily']['temperature_2m_min'])) / 2
                 df_fore = pd.DataFrame({'Date': dates, 'Temp_Avg': t_avg, 'Rain_mm': r_fore['daily']['precipitation_sum']})
-
         df_full = pd.concat([df_hist, df_fore]).drop_duplicates(subset=['Date'], keep='last').sort_values('Date')
         df_full = df_full[(df_full['Date'] >= start_date) & (df_full['Date'] <= end_date)]
         return df_full
@@ -150,41 +138,105 @@ def load_recipe_data(uploaded_file):
         try: df = pd.read_csv(uploaded_file, sep=',')
         except: df = pd.read_excel(uploaded_file)
         if df.shape[1] < 2: df = pd.read_csv(uploaded_file, sep=';')
-        
         df.columns = df.columns.str.strip()
-        
         if 'Cod' in df.columns and 'SKU' in df.columns:
             df = df.rename(columns={'SKU': 'SKU_Original_Nome'})
-
-        rename_map = {
-            'Cod': 'SKU', 
-            'Materia Prima': 'Ingredient', 
-            'Composição (mg)': 'Weight_g', 
-            'Tipo': 'Type'
-        }
+        rename_map = {'Cod': 'SKU', 'Materia Prima': 'Ingredient', 'Composição (mg)': 'Weight_g', 'Tipo': 'Type'}
         df = df.rename(columns=rename_map)
-        
         required_cols = ['SKU', 'Ingredient', 'Weight_g', 'Type']
         cols_to_keep = [c for c in required_cols if c in df.columns]
         df = df[cols_to_keep]
-        
         if 'Weight_g' in df.columns:
             df['Weight_g'] = pd.to_numeric(df['Weight_g'], errors='coerce').fillna(0)
-            
         return df
     except Exception as e:
         st.error(f"Erro ao ler Ficha Técnica: {e}")
         return pd.DataFrame()
 
+# --- CARGA DE RENDIMENTO COM CENÁRIOS ---
+@st.cache_data
+def load_yield_data_scenarios(uploaded_file):
+    try:
+        try: df = pd.read_csv(uploaded_file, sep=',')
+        except: df = pd.read_excel(uploaded_file)
+        if df.shape[1] < 2: df = pd.read_csv(uploaded_file, sep=';')
+        
+        df.columns = df.columns.str.strip()
+        df = df[pd.to_numeric(df['Rendimento'], errors='coerce') > 0]
+        df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
+        df['Produto'] = df['Produto'].astype(str).str.strip().str.lower()
+        df['Fornecedor'] = df['Fornecedor'].astype(str).str.strip().str.upper()
+        df['Origem'] = np.where(df['Fornecedor'] == 'VERDE PRIMA', 'VP', 'MERCADO')
+        
+        # Ordena por data (mais recente primeiro)
+        df = df.sort_values(['Produto', 'Origem', 'Data'], ascending=[True, True, False])
+        
+        results = []
+        for (prod, origem), group in df.groupby(['Produto', 'Origem']):
+            # Cenário 1: Última Leitura (Reativo)
+            val_1 = group['Rendimento'].iloc[0]
+            # Cenário 2: Média 3 Últimas (Equilibrado)
+            val_3 = group['Rendimento'].head(3).mean()
+            # Cenário 3: Média 5 Últimas (Conservador)
+            val_5 = group['Rendimento'].head(5).mean()
+            
+            results.append({
+                'Produto': prod,
+                'Origem': origem,
+                'Reativo (1)': val_1,
+                'Equilibrado (3)': val_3,
+                'Conservador (5)': val_5
+            })
+            
+        return pd.DataFrame(results)
+    except Exception as e:
+        st.error(f"Erro ao ler Rendimento: {e}")
+        return pd.DataFrame()
+
+# --- CARGA DE DISPONIBILIDADE (VP) ---
+@st.cache_data
+def load_availability_data(uploaded_file):
+    try:
+        try: df = pd.read_csv(uploaded_file, header=2)
+        except: df = pd.read_excel(uploaded_file, header=2)
+        df.columns = df.columns.str.strip()
+        
+        # Dicionário de Tradução
+        name_map = {
+            'crespa verde': 'alface crespa',
+            'frizzy roxa': 'frisee roxa',
+            'lollo': 'lollo rossa',
+            'chicória': 'frisee chicória',
+        }
+        
+        if 'Hortaliça' in df.columns:
+            df = df.dropna(subset=['Hortaliça'])
+            df['Hortaliça'] = df['Hortaliça'].astype(str).str.strip()
+            
+            def translate_name(name):
+                n_lower = name.lower()
+                return name_map.get(n_lower, name) 
+            
+            df['Hortaliça_Traduzida'] = df['Hortaliça'].apply(translate_name)
+            
+            cols_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta']
+            cols_existentes = [c for c in cols_dias if c in df.columns]
+            
+            df_grouped = df.groupby('Hortaliça_Traduzida')[cols_existentes].sum().reset_index()
+            return df_grouped
+        else:
+            return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erro ao ler Disponibilidade VP: {e}")
+        return pd.DataFrame()
+
 def extract_weight_from_sku(text):
-    """Extrai peso em gramas do texto (ex: '500G' -> 500.0)"""
     match = re.search(r'(\d+)\s*[gG]', str(text))
-    if match:
-        return float(match.group(1))
+    if match: return float(match.group(1))
     return 0.0
 
 # ==============================================================================
-# 2. MOTOR DE CÁLCULO
+# 2. MOTOR DE CÁLCULO E PREVISÃO
 # ==============================================================================
 
 def filter_history_vero(df):
@@ -267,7 +319,6 @@ def run_forecast(df_raw, days_ahead=7):
     train_full = df_feat[df_feat['Date'] <= last_date].dropna()
     if train_full.empty: return pd.DataFrame(), pd.DataFrame()
 
-    # --- AUTO-ML ---
     split_date = last_date - timedelta(days=14)
     X_train_sub = train_full[train_full['Date'] <= split_date]
     X_val_sub = train_full[train_full['Date'] > split_date]
@@ -345,9 +396,11 @@ st.markdown('<h1 class="title-text">PCP - Previsão & Fábrica</h1>', unsafe_all
 # --- ÁREA DE UPLOAD ---
 c_up1, c_up2 = st.columns(2)
 with c_up1:
-    uploaded_file = st.file_uploader("📂 1. Histórico de Vendas (CSV/Excel)", type=['csv', 'xlsx'])
+    uploaded_file = st.file_uploader("📂 1. Histórico Vendas", type=['csv', 'xlsx'])
+    uploaded_recipe = st.file_uploader("📋 2. Ficha Técnica", type=['csv', 'xlsx'])
 with c_up2:
-    uploaded_recipe = st.file_uploader("📋 2. Ficha Técnica (Opcional)", type=['csv', 'xlsx'])
+    uploaded_yield = st.file_uploader("🚜 3. Rendimento", type=['csv', 'xlsx'])
+    uploaded_avail = st.file_uploader("🌾 4. Disponibilidade VP", type=['csv', 'xlsx'])
 
 if 'last_file' not in st.session_state: st.session_state.last_file = None
 if uploaded_file and uploaded_file != st.session_state.last_file:
@@ -362,7 +415,7 @@ if uploaded_file:
         
         col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
         with col_btn2:
-            processar = st.button("🚀 Gerar Previsão de Vendas", use_container_width=True)
+            processar = st.button("🚀 Gerar Planejamento Completo", use_container_width=True)
 
         if processar:
             with st.spinner("Otimizando modelo (Auto-ML) e Analisando Dados..."):
@@ -446,88 +499,221 @@ if uploaded_file:
             
             df_summary = pd.DataFrame(summary)
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
-            st.caption(f"ℹ️ As datas de comparação seguem a lógica de 'Semana Comercial' (Alinhamento por Dia da Semana) e não data exata de calendário.")
             
             # --- 3. PREVISÃO DETALHADA ---
             st.divider()
-            st.write("### 🗓️ Previsão Detalhada")
-            
+            st.write("### 🗓️ Previsão Detalhada (Vendas)")
             df_piv = forecast.pivot_table(index=['SKU', 'Description', 'Group'], columns='Date', values='Orders', aggfunc='sum').reset_index()
-            
             cols_new = []
             for c in df_piv.columns:
                 if isinstance(c, pd.Timestamp): cols_new.append(c.strftime('%d/%m'))
                 else: cols_new.append(c)
             df_piv.columns = cols_new
-            
             st.dataframe(df_piv, use_container_width=True)
-            
-            # BOTÃO 1
             csv_sales = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 1. Baixar Previsão de Vendas (CSV)", csv_sales, "previsao_vendas.csv", "text/csv")
 
-            # --- 4. FÁBRICA ---
+            # --- 4. FÁBRICA & COMPRAS (LÓGICA AVANÇADA) ---
             if uploaded_recipe:
                 st.divider()
-                st.subheader("🏭 Fábrica: Necessidade de Matéria-Prima")
+                st.subheader("🏭 Planejamento de Compras (Otimizado)")
                 
+                # --- PARTE A: ALERTA DE PESO ---
                 df_recipe = load_recipe_data(uploaded_recipe)
-                
                 if not df_recipe.empty:
-                    # --- ANÁLISE DE SOBREMASSA (>5%) ---
                     df_check = df_recipe.copy()
                     df_check['Label_Weight'] = df_check['SKU'].apply(extract_weight_from_sku)
-                    
-                    # Agrupa por SKU para somar o peso da receita (em caso de mix)
                     df_check_grouped = df_check.groupby(['SKU', 'Label_Weight'])['Weight_g'].sum().reset_index()
-                    
-                    # FILTRO NOVO: Ignora produtos sem peso declarado no nome (Label_Weight = 0)
                     df_check_grouped = df_check_grouped[df_check_grouped['Label_Weight'] > 0]
-                    
-                    # Calcula divergência
                     df_check_grouped['Diff_Pct'] = ((df_check_grouped['Weight_g'] - df_check_grouped['Label_Weight']) / df_check_grouped['Label_Weight']) * 100
-                    df_check_grouped = df_check_grouped.fillna(0)
-                    
-                    # Filtra problemas (> 5%)
                     alerts = df_check_grouped[df_check_grouped['Diff_Pct'] > 5.0].sort_values('Diff_Pct', ascending=False)
-                    
                     if not alerts.empty:
-                        with st.expander("⚠️ Atenção: Discrepâncias de Peso Detectadas (Sobremassa > 5%)", expanded=True):
-                            st.write("Os seguintes produtos consomem significativamente mais matéria-prima do que o peso nominal da embalagem:")
+                        with st.expander("⚠️ Alerta: Discrepâncias de Peso (>5%)", expanded=True):
                             for index, row in alerts.iterrows():
-                                st.warning(f"🔴 **{row['SKU']}**: Embalagem {row['Label_Weight']:.0f}g vs Receita {row['Weight_g']:.0f}g (+{row['Diff_Pct']:.1f}%)")
+                                st.warning(f"🔴 **{row['SKU']}**: Rótulo {row['Label_Weight']:.0f}g vs Receita {row['Weight_g']:.0f}g (+{row['Diff_Pct']:.1f}%)")
                     
-                    # --- Lógica de Cálculo ---
+                    # --- CÁLCULO DE NECESSIDADE (KG) ---
                     if 'Type' in df_recipe.columns:
                         mask_legume = df_recipe['Type'].astype(str).str.contains('Legume', case=False, na=False)
                         df_recipe = df_recipe[~mask_legume]
                     
                     forecast['SKU_Str'] = forecast['SKU'].astype(str).str.strip()
                     df_recipe['SKU_Str'] = df_recipe['SKU'].astype(str).str.strip()
-                    
                     mask_fore = (forecast['Date'] >= f_start) & (forecast['Date'] <= f_end)
                     df_mrp = pd.merge(forecast[mask_fore], df_recipe, on='SKU_Str', how='inner')
                     df_mrp['Total_Kg'] = (df_mrp['Orders'] * df_mrp['Weight_g']) / 1000
+                    df_kg_daily = df_mrp.groupby(['Ingredient', 'Date'])['Total_Kg'].sum().reset_index()
                     
-                    df_purchasing = df_mrp.pivot_table(index='Ingredient', columns='Date', values='Total_Kg', aggfunc='sum').fillna(0)
-                    df_purchasing['TOTAL (Kg)'] = df_purchasing.sum(axis=1)
-                    df_purchasing = df_purchasing.sort_values('TOTAL (Kg)', ascending=False).reset_index()
-                    
-                    cols_mrp = []
-                    for c in df_purchasing.columns:
-                        if isinstance(c, pd.Timestamp): cols_mrp.append(c.strftime('%d/%m'))
-                        else: cols_mrp.append(c)
-                    df_purchasing.columns = cols_mrp
-                    
-                    # Formatação
-                    numeric_cols = df_purchasing.select_dtypes(include=[np.number]).columns
-                    st.dataframe(df_purchasing.style.format("{:.1f}", subset=numeric_cols), use_container_width=True)
-                    
-                    # BOTÃO 2
-                    csv_mrp = df_purchasing.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 2. Baixar Necessidade de Matéria Prima (CSV)", csv_mrp, "necessidade_materia_prima.csv", "text/csv")
-                else:
-                    st.warning("⚠️ Erro na leitura da Ficha Técnica.")
+                    if uploaded_avail and uploaded_yield:
+                        df_avail = load_availability_data(uploaded_avail)
+                        df_yield_scenarios = load_yield_data_scenarios(uploaded_yield)
+                        
+                        if not df_avail.empty and not df_yield_scenarios.empty:
+                            
+                            # --- SELETOR DE CENÁRIO ---
+                            st.write("#### 🎯 Calibragem de Rendimento")
+                            col_sel1, col_sel2 = st.columns([1, 2])
+                            with col_sel1:
+                                scenario = st.radio("Escolha o perfil de risco do rendimento:", 
+                                                    ["Reativo (1)", "Equilibrado (3)", "Conservador (5)"], 
+                                                    index=1)
+                            
+                            # --- ALGORITMO DE SUBSTITUIÇÃO ---
+                            map_dias = {0: 'Segunda', 1: 'Terça', 2: 'Quarta', 3: 'Quinta', 4: 'Sexta', 5: 'Sábado', 6: 'Domingo'}
+                            df_kg_daily['DayNum'] = df_kg_daily['Date'].dt.dayofweek
+                            df_kg_daily['DayName'] = df_kg_daily['DayNum'].map(map_dias)
+                            df_kg_daily['Ingredient_Lower'] = df_kg_daily['Ingredient'].astype(str).str.strip().str.lower()
+                            df_avail['Hortaliça_Lower'] = df_avail['Hortaliça_Traduzida'].astype(str).str.strip().str.lower()
+                            
+                            # Melt disponibilidade
+                            id_vars = ['Hortaliça_Traduzida', 'Hortaliça_Lower']
+                            val_vars = [c for c in df_avail.columns if c in map_dias.values()]
+                            df_avail_melt = df_avail.melt(id_vars=id_vars, value_vars=val_vars, var_name='DayName', value_name='Kg_Available')
+                            
+                            # Merge para saber saldo inicial
+                            df_proc = pd.merge(df_kg_daily, df_avail_melt, left_on=['Ingredient_Lower', 'DayName'], right_on=['Hortaliça_Lower', 'DayName'], how='left')
+                            df_proc['Kg_Available'] = df_proc['Kg_Available'].fillna(0)
+                            
+                            # Grupos de Substituição
+                            groups_sub = {
+                                'Frutas Verdes': ['alface crespa', 'escarola', 'frisee chicória', 'lalique', 'romana'],
+                                'Frutas Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa']
+                            }
+                            
+                            log_substitutions = []
+                            
+                            # Iterar por dia para aplicar substituição
+                            df_final_rows = []
+                            
+                            for day, group_day in df_proc.groupby('Date'):
+                                # Calcula saldo inicial
+                                group_day['Balance'] = group_day['Kg_Available'] - group_day['Total_Kg']
+                                
+                                # Aplica lógica de grupos
+                                for g_name, items in groups_sub.items():
+                                    # Filtra itens do grupo no dia
+                                    mask_g = group_day['Ingredient_Lower'].isin(items)
+                                    df_g = group_day[mask_g].copy()
+                                    
+                                    if not df_g.empty:
+                                        surplus = df_g[df_g['Balance'] > 0]
+                                        deficit = df_g[df_g['Balance'] < 0]
+                                        
+                                        # Se tem gente sobrando e gente faltando
+                                        if not surplus.empty and not deficit.empty:
+                                            # Pool de sobra
+                                            pool_surplus = surplus[['Ingredient', 'Balance']].to_dict('records')
+                                            
+                                            for idx, row_def in deficit.iterrows():
+                                                needed = abs(row_def['Balance'])
+                                                
+                                                for src in pool_surplus:
+                                                    if src['Balance'] > 0 and needed > 0:
+                                                        transfer = min(src['Balance'], needed)
+                                                        
+                                                        # Log
+                                                        log_substitutions.append({
+                                                            'Data': day.strftime('%d/%m'),
+                                                            'Grupo': g_name,
+                                                            'Falta': row_def['Ingredient'],
+                                                            'Substituto (Sobra)': src['Ingredient'],
+                                                            'Qtd (Kg)': transfer
+                                                        })
+                                                        
+                                                        # Atualiza saldos virtuais
+                                                        src['Balance'] -= transfer
+                                                        needed -= transfer
+                                                        
+                                                        # Atualiza DataFrame
+                                                        # Reduz Kg_Mkt do deficitário (pois foi coberto)
+                                                        # Aumenta uso do VP do sobressalente
+                                                        
+                                                        # Achar indices originais
+                                                        idx_src = group_day[group_day['Ingredient'] == src['Ingredient']].index[0]
+                                                        
+                                                        # O deficitário deixa de comprar mercado
+                                                        group_day.at[idx, 'Kg_Available'] += transfer # Simula que tinha
+                                                        
+                                                        # O sobressalente é consumido
+                                                        group_day.at[idx_src, 'Kg_Available'] -= transfer 
+                                                        # Nota: Na verdade, o 'Kg_Available' do sobressalente já era alto. 
+                                                        # O que muda é que vamos usar esse Kg para o outro.
+                                                        # A lógica correta para caixas:
+                                                        # Caixas do Item A (Falta) = 0 (pois foi coberto)
+                                                        # Caixas do Item B (Sobra) = (Demanda B + Transferencia) / Rendimento B
+                                                        
+                                                        # Ajuste simples: Transferimos a DEMANDA para o item que tem sobra
+                                                        group_day.at[idx_src, 'Total_Kg'] += transfer
+                                                        group_day.at[idx, 'Total_Kg'] -= transfer
+
+                                df_final_rows.append(group_day)
+                            
+                            df_processed = pd.concat(df_final_rows)
+                            
+                            # Recalcula VP/Mkt final pós-substituição
+                            df_processed['Kg_VP'] = np.minimum(df_processed['Total_Kg'], df_processed['Kg_Available'])
+                            df_processed['Kg_Mkt'] = np.maximum(df_processed['Total_Kg'] - df_processed['Kg_VP'], 0)
+                            df_processed['Sobra_VP'] = np.maximum(df_processed['Kg_Available'] - df_processed['Total_Kg'], 0)
+                            
+                            # Merge Rendimentos
+                            df_final = pd.merge(df_processed, df_yield_scenarios, left_on='Ingredient_Lower', right_on='Produto', how='left')
+                            
+                            # Seleciona Coluna de Rendimento
+                            col_yield = scenario
+                            
+                            # Separa Yield VP e Mkt
+                            # O df_yield_scenarios tem linhas duplicadas (uma pra VP, uma pra Mkt)
+                            # Precisamos fazer merge inteligente ou pivotar antes
+                            
+                            # Pivotando Rendimentos para facilitar
+                            df_y_pivot = df_yield_scenarios.pivot(index='Produto', columns='Origem', values=col_yield).reset_index()
+                            df_y_pivot.columns.name = None
+                            df_y_pivot = df_y_pivot.rename(columns={'VP': 'Y_VP', 'MERCADO': 'Y_MKT'})
+                            
+                            # Merge Final
+                            df_calc = pd.merge(df_processed, df_y_pivot, left_on='Ingredient_Lower', right_on='Produto', how='left')
+                            df_calc['Y_VP'] = df_calc['Y_VP'].fillna(10.0)
+                            df_calc['Y_MKT'] = df_calc['Y_MKT'].fillna(10.0)
+                            
+                            # Caixas
+                            df_calc['Boxes_VP'] = np.ceil(df_calc['Kg_VP'] / df_calc['Y_VP'])
+                            df_calc['Boxes_Mkt'] = np.ceil(df_calc['Kg_Mkt'] / df_calc['Y_MKT'])
+                            
+                            # Resumo
+                            df_boxes = df_calc.groupby('Ingredient')[['Total_Kg', 'Kg_VP', 'Kg_Mkt', 'Boxes_VP', 'Boxes_Mkt', 'Sobra_VP']].sum().reset_index()
+                            df_boxes = df_boxes.rename(columns={
+                                'Ingredient': 'Matéria Prima',
+                                'Total_Kg': 'Demanda Total (Kg)',
+                                'Kg_VP': 'Atendido VP (Kg)',
+                                'Kg_Mkt': 'Comprar Mercado (Kg)',
+                                'Boxes_VP': 'Caixas VP',
+                                'Boxes_Mkt': 'Comprar Caixas (Mkt)',
+                                'Sobra_VP': 'Sobra VP (Kg)'
+                            })
+                            
+                            # EXIBIÇÃO
+                            st.write(f"#### 📦 Pedido de Compras (Cenário: {scenario})")
+                            
+                            if log_substitutions:
+                                with st.expander("🔄 Relatório de Substituições (Frutas Verdes/Vermelhas)", expanded=True):
+                                    st.dataframe(pd.DataFrame(log_substitutions))
+                            
+                            numeric_cols = df_boxes.select_dtypes(include=[np.number]).columns
+                            st.dataframe(df_boxes.style.format("{:.1f}", subset=numeric_cols), use_container_width=True)
+                            
+                            if df_boxes['Sobra_VP'].sum() > 0:
+                                st.info(f"ℹ️ Sobra total VP: {df_boxes['Sobra_VP'].sum():.0f} Kg")
+                            
+                            csv_boxes = df_boxes.to_csv(index=False).encode('utf-8')
+                            st.download_button("📥 2. Baixar Pedido de Compras Final (CSV)", csv_boxes, "pedido_compras_final.csv", "text/csv")
+
+                        else:
+                            st.warning("⚠️ Arquivos auxiliares inválidos.")
+                    else:
+                        st.info("💡 Suba Rendimento e Disponibilidade para cálculo de caixas.")
+                        # Fallback Kg
+                        df_kg_show = df_kg_daily.pivot_table(index='Ingredient', columns='Date', values='Total_Kg', aggfunc='sum').fillna(0)
+                        st.dataframe(df_kg_show.style.format("{:.1f}"), use_container_width=True)
 
             # --- 5. IA ---
             st.divider()
