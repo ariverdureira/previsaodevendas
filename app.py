@@ -14,11 +14,10 @@ from sklearn.metrics import mean_absolute_error
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
 
 # ==============================================================================
-# 1. FUNÇÕES AUXILIARES E CALENDÁRIO INTELIGENTE
+# 1. FUNÇÕES AUXILIARES E CARGAS
 # ==============================================================================
 
 def get_holidays_calendar(start_date, end_date):
-    """Gera calendário de feriados e datas comemorativas"""
     try:
         br_holidays = holidays.Brazil(subdiv='SP', state='SP')
         high_impact_fixed = {(12, 25): "Natal", (1, 1): "Ano Novo"}
@@ -61,7 +60,6 @@ def get_holidays_calendar(start_date, end_date):
 
 @st.cache_data(ttl=3600)
 def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
-    """Busca Clima Real (Passado) e Previsão (Futuro)"""
     try:
         today = pd.Timestamp.now().normalize()
         hist_end = min(end_date, today - timedelta(days=2))
@@ -146,7 +144,6 @@ def load_data(uploaded_file):
         st.error(f"Erro ao ler vendas: {e}")
         return pd.DataFrame()
 
-# --- NOVO: CARREGAR FICHA TÉCNICA ---
 @st.cache_data
 def load_recipe_data(uploaded_file):
     try:
@@ -154,35 +151,33 @@ def load_recipe_data(uploaded_file):
         except: df = pd.read_excel(uploaded_file)
         if df.shape[1] < 2: df = pd.read_csv(uploaded_file, sep=';')
         
-        # Mapeamento para garantir nomes padronizados
-        # O arquivo do usuário tem: Cod, Materia Prima, Composição (mg), Tipo
+        df.columns = df.columns.str.strip()
+        
+        if 'Cod' in df.columns and 'SKU' in df.columns:
+            df = df.rename(columns={'SKU': 'SKU_Original_Nome'})
+
         rename_map = {
             'Cod': 'SKU', 
             'Materia Prima': 'Ingredient', 
-            'Composição (mg)': 'Weight_g', # Assumindo gramas baseado no contexto (250 para 250g)
+            'Composição (mg)': 'Weight_g', 
             'Tipo': 'Type'
         }
         df = df.rename(columns=rename_map)
         
-        # Filtra colunas essenciais
         required_cols = ['SKU', 'Ingredient', 'Weight_g', 'Type']
-        # Verifica se as colunas existem (ou se os nomes originais estão lá)
-        available_cols = [c for c in required_cols if c in df.columns]
+        cols_to_keep = [c for c in required_cols if c in df.columns]
+        df = df[cols_to_keep]
         
-        if len(available_cols) < 3:
-            # Tenta mapear se não encontrou pelo rename direto (flexibilidade)
-            df.columns = df.columns.str.strip()
-            # Reinicia rename se falhou
-            return df # Retorna raw para debug se falhar
+        if 'Weight_g' in df.columns:
+            df['Weight_g'] = pd.to_numeric(df['Weight_g'], errors='coerce').fillna(0)
             
-        df['Weight_g'] = pd.to_numeric(df['Weight_g'], errors='coerce').fillna(0)
         return df
     except Exception as e:
         st.error(f"Erro ao ler Ficha Técnica: {e}")
         return pd.DataFrame()
 
 # ==============================================================================
-# 2. ENGENHARIA DE FEATURES E PREVISÃO
+# 2. MOTOR DE CÁLCULO
 # ==============================================================================
 
 def filter_history_vero(df):
@@ -265,8 +260,33 @@ def run_forecast(df_raw, days_ahead=7):
     train_full = df_feat[df_feat['Date'] <= last_date].dropna()
     if train_full.empty: return pd.DataFrame(), pd.DataFrame()
 
-    # Modelagem (Simplificada para brevidade, mantendo lógica anterior)
-    model = XGBRegressor(n_estimators=300, learning_rate=0.03, max_depth=6, n_jobs=-1)
+    # --- AUTO-ML ---
+    split_date = last_date - timedelta(days=14)
+    X_train_sub = train_full[train_full['Date'] <= split_date]
+    X_val_sub = train_full[train_full['Date'] > split_date]
+    
+    best_params = {'n_estimators': 300, 'learning_rate': 0.03, 'max_depth': 6}
+    
+    if not X_train_sub.empty and not X_val_sub.empty:
+        configs = [
+            {'name': 'Rápido', 'n_estimators': 150, 'learning_rate': 0.05, 'max_depth': 5},
+            {'name': 'Profundo', 'n_estimators': 400, 'learning_rate': 0.02, 'max_depth': 7},
+            {'name': 'Padrão', 'n_estimators': 300, 'learning_rate': 0.03, 'max_depth': 6}
+        ]
+        best_mae = float('inf')
+        for cfg in configs:
+            try:
+                m = XGBRegressor(n_estimators=cfg['n_estimators'], learning_rate=cfg['learning_rate'], max_depth=cfg['max_depth'], n_jobs=-1)
+                m.fit(X_train_sub[features], X_train_sub['Orders'])
+                val_preds = m.predict(X_val_sub[features])
+                mae = mean_absolute_error(X_val_sub['Orders'], val_preds)
+                if mae < best_mae:
+                    best_mae = mae
+                    best_params = cfg
+            except: continue
+        print(f"Config Vencedora: {best_params.get('name')}")
+
+    model = XGBRegressor(n_estimators=best_params['n_estimators'], learning_rate=best_params['learning_rate'], max_depth=best_params['max_depth'], n_jobs=-1)
     model.fit(train_full[features], train_full['Orders'])
     
     preds = []
@@ -322,7 +342,6 @@ with c_up1:
 with c_up2:
     uploaded_recipe = st.file_uploader("📋 2. Ficha Técnica (Opcional)", type=['csv', 'xlsx'])
 
-# Limpeza de memória se trocar arquivo
 if 'last_file' not in st.session_state: st.session_state.last_file = None
 if uploaded_file and uploaded_file != st.session_state.last_file:
     st.session_state.clear()
@@ -339,7 +358,7 @@ if uploaded_file:
             processar = st.button("🚀 Gerar Previsão de Vendas", use_container_width=True)
 
         if processar:
-            with st.spinner("Analisando Clima Histórico e Tendências..."):
+            with st.spinner("Otimizando modelo (Auto-ML) e Analisando Dados..."):
                 try:
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=7)
                     if not forecast_result.empty:
@@ -354,7 +373,7 @@ if uploaded_file:
             forecast = st.session_state['forecast_data']
             weather_df = st.session_state.get('weather_data', pd.DataFrame())
             
-            # --- SEÇÃO 1: PREVISÃO DO TEMPO ---
+            # --- 1. CLIMA ---
             if not weather_df.empty:
                 st.divider()
                 st.subheader("🌤️ Clima da Semana")
@@ -365,96 +384,137 @@ if uploaded_file:
                 w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
             
-            # --- SEÇÃO 2: RESULTADO DE VENDAS ---
+            # --- 2. RESUMO EXECUTIVO (COM AUDITORIA DE DATAS) ---
             st.divider()
-            st.subheader("📊 Previsão de Pedidos (Unidades)")
+            st.subheader("📊 Resumo Executivo")
             
-            # Tabela Resumida por Grupo
+            # Definição das datas
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=7)
-            mask_fore = (forecast['Date'] >= f_start) & (forecast['Date'] <= f_end)
-            df_view = forecast[mask_fore].groupby('Group')['Orders'].sum().reset_index().rename(columns={'Group':'Grupo', 'Orders':'Total Unidades'})
-            st.dataframe(df_view, hide_index=True, use_container_width=True)
             
-            # --- SEÇÃO 3: CÁLCULO DE MATÉRIA-PRIMA (NOVO!) ---
+            # Lógica Comercial (52 semanas = Mesmo Dia da Semana)
+            ly_start = f_start - timedelta(weeks=52)
+            ly_end = f_end - timedelta(weeks=52)
+            l2y_start = f_start - timedelta(weeks=104)
+            l2y_end = f_end - timedelta(weeks=104)
+            
+            # Formatação para exibição na tabela (AUDITORIA)
+            str_ly = f"2025 ({ly_start.strftime('%d/%m')} a {ly_end.strftime('%d/%m')})"
+            str_2y = f"2024 ({l2y_start.strftime('%d/%m')} a {l2y_end.strftime('%d/%m')})"
+            
+            hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
+            hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
+            
+            groups = ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis']
+            summary = []
+            
+            for g in groups:
+                v_curr = forecast[forecast['Group'] == g]['Orders'].sum()
+                v_ly = hist_ly[hist_ly['Group'] == g]['Orders'].sum()
+                v_2y = hist_2y[hist_2y['Group'] == g]['Orders'].sum()
+                
+                p_ly = ((v_curr / v_ly) - 1) * 100 if v_ly > 0 else 0
+                p_2y = ((v_curr / v_2y) - 1) * 100 if v_2y > 0 else 0
+                
+                summary.append({
+                    'Grupo': g,
+                    'Previsão 7d': int(v_curr),
+                    str_ly: int(v_ly),          # Nome da coluna dinâmico
+                    'Var % (vs 25)': f"{p_ly:+.1f}%",
+                    str_2y: int(v_2y),          # Nome da coluna dinâmico
+                    'Var % (vs 24)': f"{p_2y:+.1f}%"
+                })
+            
+            tot_cur = forecast['Orders'].sum()
+            tot_ly = hist_ly['Orders'].sum()
+            tot_2y = hist_2y['Orders'].sum()
+            pt_ly = ((tot_cur / tot_ly) - 1) * 100 if tot_ly > 0 else 0
+            pt_2y = ((tot_cur / tot_2y) - 1) * 100 if tot_2y > 0 else 0
+            
+            summary.append({
+                'Grupo': 'TOTAL GERAL',
+                'Previsão 7d': int(tot_cur),
+                str_ly: int(tot_ly),
+                'Var % (vs 25)': f"{pt_ly:+.1f}%",
+                str_2y: int(tot_2y),
+                'Var % (vs 24)': f"{pt_2y:+.1f}%"
+            })
+            
+            df_summary = pd.DataFrame(summary)
+            st.dataframe(df_summary, hide_index=True, use_container_width=True)
+            st.caption(f"ℹ️ As datas de comparação seguem a lógica de 'Semana Comercial' (Alinhamento por Dia da Semana) e não data exata de calendário.")
+            
+            # --- 3. PREVISÃO DETALHADA ---
+            st.divider()
+            st.write("### 🗓️ Previsão Detalhada")
+            
+            df_piv = forecast.pivot_table(index=['SKU', 'Description', 'Group'], columns='Date', values='Orders', aggfunc='sum').reset_index()
+            
+            cols_new = []
+            for c in df_piv.columns:
+                if isinstance(c, pd.Timestamp): cols_new.append(c.strftime('%d/%m'))
+                else: cols_new.append(c)
+            df_piv.columns = cols_new
+            
+            st.dataframe(df_piv, use_container_width=True)
+            
+            # BOTÃO 1
+            csv_sales = df_piv.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 1. Baixar Previsão de Vendas (CSV)", csv_sales, "previsao_vendas.csv", "text/csv")
+
+            # --- 4. FÁBRICA ---
             if uploaded_recipe:
                 st.divider()
-                st.subheader("🏭 Necessidade de Matéria-Prima (Compras)")
+                st.subheader("🏭 Fábrica: Necessidade de Matéria-Prima")
                 
                 df_recipe = load_recipe_data(uploaded_recipe)
                 
                 if not df_recipe.empty:
-                    # 1. Filtra Legumes (Exclusão solicitada)
-                    # Verifica se coluna Type existe, senão ignora filtro
                     if 'Type' in df_recipe.columns:
-                        # Filtra tudo que contiver 'legume' (case insensitive)
                         mask_legume = df_recipe['Type'].astype(str).str.contains('Legume', case=False, na=False)
                         df_recipe = df_recipe[~mask_legume]
-                        st.caption(f"✅ Filtro aplicado: Ingredientes do tipo 'Legume' foram excluídos do cálculo.")
                     
-                    # 2. Cruza Previsão (SKU) com Receita (SKU/Cod)
-                    # Garante que chaves sejam do mesmo tipo (str)
                     forecast['SKU_Str'] = forecast['SKU'].astype(str).str.strip()
                     df_recipe['SKU_Str'] = df_recipe['SKU'].astype(str).str.strip()
                     
+                    mask_fore = (forecast['Date'] >= f_start) & (forecast['Date'] <= f_end)
                     df_mrp = pd.merge(forecast[mask_fore], df_recipe, on='SKU_Str', how='inner')
-                    
-                    # 3. Calcula Necessidade: (Qtd Pedido * Peso Receita) / 1000 = KG
                     df_mrp['Total_Kg'] = (df_mrp['Orders'] * df_mrp['Weight_g']) / 1000
                     
-                    # 4. Agrupa por Ingrediente e Data
-                    df_purchasing = df_mrp.pivot_table(
-                        index='Ingredient', 
-                        columns='Date', 
-                        values='Total_Kg', 
-                        aggfunc='sum'
-                    ).fillna(0)
+                    df_purchasing = df_mrp.pivot_table(index='Ingredient', columns='Date', values='Total_Kg', aggfunc='sum').fillna(0)
+                    df_purchasing['TOTAL (Kg)'] = df_purchasing.sum(axis=1)
+                    df_purchasing = df_purchasing.sort_values('TOTAL (Kg)', ascending=False).reset_index()
                     
-                    # Totais
-                    df_purchasing['TOTAL SEMANA (Kg)'] = df_purchasing.sum(axis=1)
-                    df_purchasing = df_purchasing.sort_values('TOTAL SEMANA (Kg)', ascending=False).reset_index()
-                    
-                    # Formata datas nas colunas
-                    cols_new = []
+                    cols_mrp = []
                     for c in df_purchasing.columns:
-                        if isinstance(c, pd.Timestamp): cols_new.append(c.strftime('%d/%m'))
-                        else: cols_new.append(c)
-                    df_purchasing.columns = cols_new
+                        if isinstance(c, pd.Timestamp): cols_mrp.append(c.strftime('%d/%m'))
+                        else: cols_mrp.append(c)
+                    df_purchasing.columns = cols_mrp
                     
-                    # Exibe e Download
                     st.dataframe(df_purchasing.style.format("{:.1f}"), use_container_width=True)
                     
+                    # BOTÃO 2
                     csv_mrp = df_purchasing.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Baixar Lista de Compras (Kg)", csv_mrp, "lista_compras_materiaprima.csv", "text/csv")
+                    st.download_button("📥 2. Baixar Lista de Compras Fábrica (CSV)", csv_mrp, "lista_compras_materiaprima.csv", "text/csv")
                 else:
-                    st.warning("⚠️ Não foi possível ler a Ficha Técnica. Verifique as colunas (Cod, Materia Prima, Composição).")
+                    st.warning("⚠️ Erro na leitura da Ficha Técnica.")
 
-            # --- SEÇÃO 4: DOWNLOAD E IA ---
+            # --- 5. IA ---
             st.divider()
-            
-            # Download Vendas Detalhado
-            df_piv = forecast.pivot_table(index=['SKU', 'Description'], columns='Date', values='Orders', aggfunc='sum').reset_index()
-            csv_sales = df_piv.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar Previsão de Vendas (Detalhada)", csv_sales, "previsao_vendas.csv", "text/csv")
-
-            # IA Gemini
             st.subheader("🤖 Analista IA")
             api_key = st.text_input("Insira sua Gemini API Key:", type="password")
             
             if api_key:
                 client = genai.Client(api_key=api_key)
-                st.info("Conectado.")
                 query = st.text_area("Pergunta sobre a produção ou vendas:", key="gemini_query")
                 if st.button("Consultar IA"):
                     with st.spinner("Analisando..."):
-                        # Prepara contexto resumido para a IA
-                        resumo_vendas = df_view.to_string()
+                        resumo_str = df_summary.to_string()
                         prompt = f"""
                         Você é um gerente de PCP.
-                        Resumo da Previsão de Vendas (Próximos 7 dias):
-                        {resumo_vendas}
-                        
-                        Pergunta do usuário: {query}
+                        Resumo Executivo:
+                        {resumo_str}
+                        Pergunta: {query}
                         """
                         try:
                             response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
