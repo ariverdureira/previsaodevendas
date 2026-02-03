@@ -153,7 +153,6 @@ def load_recipe_data(uploaded_file):
         st.error(f"Erro ao ler Ficha Técnica: {e}")
         return pd.DataFrame()
 
-# --- CARGA DE RENDIMENTO COM CENÁRIOS ---
 @st.cache_data
 def load_yield_data_scenarios(uploaded_file):
     try:
@@ -189,7 +188,6 @@ def load_yield_data_scenarios(uploaded_file):
         st.error(f"Erro ao ler Rendimento: {e}")
         return pd.DataFrame()
 
-# --- CARGA DE DISPONIBILIDADE (VP) ---
 @st.cache_data
 def load_availability_data(uploaded_file):
     try:
@@ -537,18 +535,33 @@ if uploaded_file:
                     mask_fore = (forecast['Date'] >= f_start) & (forecast['Date'] <= f_end)
                     df_mrp = pd.merge(forecast[mask_fore], df_recipe, on='SKU_Str', how='inner')
                     df_mrp['Total_Kg'] = (df_mrp['Orders'] * df_mrp['Weight_g']) / 1000
-                    df_kg_daily = df_mrp.groupby(['Ingredient', 'Date'])['Total_Kg'].sum().reset_index()
                     
-                    # --- REGRA DO SÁBADO -> SEXTA ---
-                    # Identifica sábados
-                    df_kg_daily['DayNum'] = df_kg_daily['Date'].dt.dayofweek
-                    mask_sat = df_kg_daily['DayNum'] == 5 # 5 é Sábado
+                    # --- DIVISÃO: RÍGIDO (Não Substitui) vs FLEXÍVEL (Substitui) ---
+                    # Regra: Se Nome do Ingrediente está no SKU -> Rígido
+                    def check_rigid(row):
+                        ing = str(row['Ingredient']).lower()
+                        desc = str(row['Description']).lower()
+                        # Normalização simples (ideal seria unidecode)
+                        return ing in desc
+
+                    df_mrp['Is_Rigid'] = df_mrp.apply(check_rigid, axis=1)
                     
-                    # Para cada sábado, subtrai 1 dia da data (vira sexta)
-                    df_kg_daily.loc[mask_sat, 'Date'] = df_kg_daily.loc[mask_sat, 'Date'] - timedelta(days=1)
+                    # Agrupa por Dia, Ingrediente E Tipo de Demanda
+                    df_mrp['Date_Clean'] = df_mrp['Date'] # Preserva data original
                     
-                    # Re-agrupa para somar a necessidade do sábado na sexta
-                    df_kg_daily = df_kg_daily.groupby(['Ingredient', 'Date'])['Total_Kg'].sum().reset_index()
+                    # REGRA SÁBADO -> SEXTA (Aplica-se a todos)
+                    df_mrp['DayNum'] = df_mrp['Date'].dt.dayofweek
+                    mask_sat = df_mrp['DayNum'] == 5
+                    df_mrp.loc[mask_sat, 'Date'] = df_mrp.loc[mask_sat, 'Date'] - timedelta(days=1)
+                    
+                    # Agregação Híbrida
+                    df_kg_daily = df_mrp.groupby(['Ingredient', 'Date', 'Is_Rigid'])['Total_Kg'].sum().unstack(fill_value=0).reset_index()
+                    # Renomeia colunas do unstack
+                    if True not in df_kg_daily.columns: df_kg_daily[True] = 0
+                    if False not in df_kg_daily.columns: df_kg_daily[False] = 0
+                    
+                    df_kg_daily = df_kg_daily.rename(columns={True: 'Demand_Rigid', False: 'Demand_Flex'})
+                    df_kg_daily['Total_Kg'] = df_kg_daily['Demand_Rigid'] + df_kg_daily['Demand_Flex']
                     
                     if uploaded_avail and uploaded_yield:
                         df_avail = load_availability_data(uploaded_avail)
@@ -586,49 +599,64 @@ if uploaded_file:
                             df_final_rows = []
                             
                             for day, group_day in df_proc.groupby('Date'):
-                                group_day['Balance'] = group_day['Kg_Available'] - group_day['Total_Kg']
+                                # 1. Atender Demanda Rígida (Sem Substituição)
+                                group_day['Used_VP_Rigid'] = np.minimum(group_day['Kg_Available'], group_day['Demand_Rigid'])
+                                group_day['Deficit_Rigid'] = group_day['Demand_Rigid'] - group_day['Used_VP_Rigid'] # Vai pra Mkt
+                                group_day['Remaining_VP'] = group_day['Kg_Available'] - group_day['Used_VP_Rigid']
                                 
+                                # 2. Preparar Demanda Flexível
+                                # O saldo disponível agora é o 'Remaining_VP'. A demanda é 'Demand_Flex'.
+                                # Balance Flex calcula se sobra ou falta VP *para a parte flexível*
+                                group_day['Balance_Flex'] = group_day['Remaining_VP'] - group_day['Demand_Flex']
+                                
+                                # 3. Substituição (Apenas no Flexível)
                                 for g_name, items in groups_sub.items():
                                     mask_g = group_day['Ingredient_Lower'].isin(items)
                                     df_g = group_day[mask_g].copy()
                                     
                                     if not df_g.empty:
-                                        surplus = df_g[df_g['Balance'] > 0]
-                                        deficit = df_g[df_g['Balance'] < 0]
+                                        surplus = df_g[df_g['Balance_Flex'] > 0]
+                                        deficit = df_g[df_g['Balance_Flex'] < 0]
                                         
                                         if not surplus.empty and not deficit.empty:
-                                            pool_surplus = surplus[['Ingredient', 'Balance']].to_dict('records')
+                                            pool_surplus = surplus[['Ingredient', 'Balance_Flex']].to_dict('records')
                                             
                                             for idx, row_def in deficit.iterrows():
-                                                needed = abs(row_def['Balance'])
+                                                needed = abs(row_def['Balance_Flex'])
                                                 for src in pool_surplus:
-                                                    if src['Balance'] > 0 and needed > 0:
-                                                        transfer = min(src['Balance'], needed)
+                                                    if src['Balance_Flex'] > 0 and needed > 0:
+                                                        transfer = min(src['Balance_Flex'], needed)
                                                         log_substitutions.append({
                                                             'Data': day.strftime('%d/%m'),
                                                             'Grupo': g_name,
-                                                            'Falta': row_def['Ingredient'],
+                                                            'Falta (Flex)': row_def['Ingredient'],
                                                             'Substituto': src['Ingredient'],
                                                             'Qtd (Kg)': transfer
                                                         })
-                                                        src['Balance'] -= transfer
+                                                        src['Balance_Flex'] -= transfer
                                                         needed -= transfer
                                                         
                                                         idx_src = group_day[group_day['Ingredient'] == src['Ingredient']].index[0]
-                                                        # Aumenta disponibilidade virtual do deficitário
-                                                        group_day.at[idx, 'Kg_Available'] += transfer
-                                                        # Transfere a demanda para o que tem sobra (para consumir a sobra)
-                                                        group_day.at[idx_src, 'Total_Kg'] += transfer
-                                                        group_day.at[idx, 'Total_Kg'] -= transfer
+                                                        # Aumenta disponibilidade virtual do deficitário (para cobrir Flex)
+                                                        group_day.at[idx, 'Remaining_VP'] += transfer
+                                                        # Transfere a demanda Flex para o que tem sobra
+                                                        group_day.at[idx_src, 'Demand_Flex'] += transfer
+                                                        group_day.at[idx, 'Demand_Flex'] -= transfer
 
                                 df_final_rows.append(group_day)
                             
                             df_processed = pd.concat(df_final_rows)
                             
-                            # Recalcula
-                            df_processed['Kg_VP'] = np.minimum(df_processed['Total_Kg'], df_processed['Kg_Available'])
-                            df_processed['Kg_Mkt'] = np.maximum(df_processed['Total_Kg'] - df_processed['Kg_VP'], 0)
-                            df_processed['Sobra_VP'] = np.maximum(df_processed['Kg_Available'] - df_processed['Total_Kg'], 0)
+                            # 4. Consolidação Final
+                            # VP atende Rígido (já calculado) + Flexível (pós-substituição)
+                            # Se Remaining_VP > Demand_Flex, usa tudo Demand_Flex. Senão usa Remaining.
+                            df_processed['Used_VP_Flex'] = np.minimum(df_processed['Remaining_VP'], df_processed['Demand_Flex'])
+                            df_processed['Deficit_Flex'] = df_processed['Demand_Flex'] - df_processed['Used_VP_Flex']
+                            
+                            df_processed['Kg_VP'] = df_processed['Used_VP_Rigid'] + df_processed['Used_VP_Flex']
+                            df_processed['Kg_Mkt'] = df_processed['Deficit_Rigid'] + df_processed['Deficit_Flex']
+                            df_processed['Sobra_VP'] = df_processed['Remaining_VP'] - df_processed['Used_VP_Flex']
+                            df_processed['Sobra_VP'] = df_processed['Sobra_VP'].clip(lower=0)
                             
                             df_final = pd.merge(df_processed, df_yield_scenarios, left_on='Ingredient_Lower', right_on='Produto', how='left')
                             
@@ -643,38 +671,40 @@ if uploaded_file:
                             
                             df_calc['Boxes_Mkt'] = np.ceil(df_calc['Kg_Mkt'] / df_calc['Y_MKT'])
                             
-                            # VISUALIZAÇÃO DIÁRIA (PIVOT) - CAIXAS DE COMPRA
+                            # --- EXIBIÇÃO ---
                             st.write(f"#### 🛒 Ordem de Compra Diária (Caixas Mercado - Cenário {scenario})")
                             
-                            # Pivot: Rows=Ingrediente, Cols=Dia(Fmt), Val=Caixas
                             df_daily_view = df_calc.pivot_table(index='Ingredient', columns='Date', values='Boxes_Mkt', aggfunc='sum').fillna(0)
-                            
-                            # Formata colunas de data
                             cols_fmt = []
                             for c in df_daily_view.columns:
                                 d_str = c.strftime('%d/%m (%a)')
-                                # Traduz dia da semana
                                 d_str = d_str.replace('Mon', 'Seg').replace('Tue', 'Ter').replace('Wed', 'Qua').replace('Thu', 'Qui').replace('Fri', 'Sex')
                                 cols_fmt.append(d_str)
                             df_daily_view.columns = cols_fmt
-                            
-                            # Adiciona Total
                             df_daily_view['TOTAL SEMANA'] = df_daily_view.sum(axis=1)
-                            
-                            # Filtra só o que tem compra
                             df_daily_view = df_daily_view[df_daily_view['TOTAL SEMANA'] > 0]
-                            
                             st.dataframe(df_daily_view.style.format("{:.0f}"), use_container_width=True)
                             
+                            # REPORT SUBSTITUIÇÕES
                             if log_substitutions:
-                                with st.expander("🔄 Relatório de Substituições Realizadas", expanded=False):
+                                with st.expander("🔄 Relatório de Substituições (Apenas Demanda Flexível)", expanded=False):
                                     st.dataframe(pd.DataFrame(log_substitutions))
                             
-                            # --- RESUMO TOTAL PARA O KEYERROR ---
-                            # Garante que temos a soma total independente do pivot
+                            # REPORT RENDIMENTO USADO (NOVO)
+                            with st.expander("📊 Detalhes de Rendimento Utilizado (Auditoria)", expanded=False):
+                                audit_yield = df_calc[['Ingredient', 'Y_VP', 'Y_MKT']].drop_duplicates().dropna()
+                                audit_yield = audit_yield.rename(columns={'Y_VP': 'Rendimento VP (Kg/Cx)', 'Y_MKT': 'Rendimento Mkt (Kg/Cx)'})
+                                st.dataframe(audit_yield)
+
+                            # REPORT SOBRAS VP (NOVO)
                             total_sobra = df_calc['Sobra_VP'].sum()
                             if total_sobra > 0:
-                                st.info(f"ℹ️ Sobra Total da Verde Prima na semana: {total_sobra:.0f} Kg")
+                                with st.expander(f"🚜 Sobras Verde Prima (Total: {total_sobra:.0f} Kg)", expanded=False):
+                                    # Agrupa sobra por produto
+                                    df_sobras = df_calc.groupby('Ingredient')['Sobra_VP'].sum().reset_index()
+                                    df_sobras = df_sobras[df_sobras['Sobra_VP'] > 0].sort_values('Sobra_VP', ascending=False)
+                                    df_sobras = df_sobras.rename(columns={'Sobra_VP': 'Sobra (Kg)'})
+                                    st.dataframe(df_sobras.style.format("{:.1f}"), use_container_width=True)
 
                             csv_order = df_daily_view.to_csv().encode('utf-8')
                             st.download_button("📥 Baixar Ordem de Compra (Diária)", csv_order, "ordem_compra_diaria.csv", "text/csv")
