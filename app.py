@@ -12,7 +12,9 @@ from google import genai
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
 
-# --- 1. FUNÇÕES AUXILIARES ---
+# ==============================================================================
+# 1. FUNÇÕES AUXILIARES E DE CARGA
+# ==============================================================================
 
 def get_holidays_calendar(start_date, end_date):
     try:
@@ -37,7 +39,7 @@ def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
             "timezone": "America/Sao_Paulo", 
             "forecast_days": days + 2
         }
-        r = requests.get(url, params=params).json()
+        r = requests.get(url, params=params, timeout=5).json() # Timeout adicionado
         
         dates = pd.to_datetime(r['daily']['time'])
         t_max = np.array(r['daily']['temperature_2m_max'])
@@ -51,8 +53,6 @@ def get_live_forecast(days=14, lat=-23.55, lon=-46.63):
         })
     except: 
         return None
-
-# --- 2. CLASSIFICAÇÃO DE GRUPOS ---
 
 def classify_group(desc):
     if not isinstance(desc, str): return 'Outros'
@@ -120,7 +120,9 @@ def load_data(uploaded_file):
         st.error(f"Erro ao ler arquivo: {e}")
         return pd.DataFrame()
 
-# --- 3. PRÉ-PROCESSAMENTO ---
+# ==============================================================================
+# 2. MOTOR DE PREVISÃO
+# ==============================================================================
 
 def filter_history_vero(df):
     mask_vero = df['Group'] == 'Vero'
@@ -156,8 +158,6 @@ def generate_features(df):
     d['roll_7'] = d.groupby('SKU')['Orders'].shift(1).rolling(7).mean()
     return d
 
-# --- 4. MOTOR DE PREVISÃO ---
-
 def run_forecast(df_raw, days_ahead=14):
     df_train_base = filter_history_vero(df_raw)
     df_train_base = clean_outliers(df_train_base)
@@ -167,25 +167,30 @@ def run_forecast(df_raw, days_ahead=14):
     future_range = pd.date_range(start_date, last_date + timedelta(days=days_ahead))
     df_dates = pd.DataFrame({'Date': future_range})
     
-    # --- CLIMA ---
+    # --- LÓGICA DE CLIMA ROBUSTA ---
     weather = get_live_forecast(days=days_ahead)
     
-    weather_future = pd.DataFrame()
-    if weather is not None:
-        weather_future = weather[(weather['Date'] > last_date) & (weather['Date'] <= last_date + timedelta(days=days_ahead))].copy()
-    
+    # Gera dados sintéticos (padrão sazonal) como base
     np.random.seed(42)
     df_dates['Temp_Avg'] = np.random.normal(25, 3, len(df_dates))
     is_summer = df_dates['Date'].dt.month.isin([1, 2, 3, 12])
     df_dates['Rain_mm'] = np.where(is_summer, np.random.exponential(8, len(df_dates)), 4)
     
+    # Se a API funcionar, sobrescreve com dados reais
     if weather is not None:
         weather['Date'] = pd.to_datetime(weather['Date'])
         df_dates = pd.merge(df_dates, weather, on='Date', how='left', suffixes=('', '_real'))
         df_dates['Temp_Avg'] = df_dates['Temp_Avg_real'].fillna(df_dates['Temp_Avg'])
         df_dates['Rain_mm'] = df_dates['Rain_mm_real'].fillna(df_dates['Rain_mm'])
         df_dates = df_dates[['Date', 'Temp_Avg', 'Rain_mm']]
-        
+    
+    # CORREÇÃO: Garante que weather_future SEMPRE tenha dados (Reais ou Estimados)
+    weather_future = df_dates[
+        (df_dates['Date'] > last_date) & 
+        (df_dates['Date'] <= last_date + timedelta(days=days_ahead))
+    ][['Date', 'Temp_Avg', 'Rain_mm']].copy()
+    
+    # Continua com Feriados e Merge...
     holidays_df = get_holidays_calendar(df_dates['Date'].min(), df_dates['Date'].max())
     df_dates = pd.merge(df_dates, holidays_df, on='Date', how='left')
     df_dates['IsHoliday'] = df_dates['IsHoliday'].fillna(0)
@@ -204,7 +209,6 @@ def run_forecast(df_raw, days_ahead=14):
     train_data = df_feat[df_feat['Date'] <= last_date].dropna()
     
     if train_data.empty:
-        st.error("Erro: Dados insuficientes.")
         return pd.DataFrame(), pd.DataFrame()
         
     features = ['DayOfWeek','IsWeekend','IsHoliday','Temp_Avg','Rain_mm','lag_1','lag_7','roll_7']
@@ -232,7 +236,6 @@ def run_forecast(df_raw, days_ahead=14):
         row_pred['Orders'] = np.maximum(np.round(y_pred, 0), 0)
         
         is_sunday = next_day.dayofweek == 6
-        # --- AQUI ESTAVA O ERRO ---
         is_holiday = row_pred['IsHoliday'].values[0] == 1
         
         if is_sunday or is_holiday:
@@ -243,9 +246,12 @@ def run_forecast(df_raw, days_ahead=14):
         progress_bar.progress(i / days_ahead)
         
     return pd.concat(preds), weather_future
-# --- 5. INTERFACE DO USUÁRIO ---
 
-# Estilo visual
+# ==============================================================================
+# 3. INTERFACE VISUAL
+# ==============================================================================
+
+# Estilo
 st.markdown("""
     <style>
         .title-text {
@@ -262,7 +268,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- CABEÇALHO ---
+# Cabeçalho
 c1, c2, c3 = st.columns([1, 2, 1])
 with c2:
     try:
@@ -272,8 +278,7 @@ with c2:
 
 st.markdown('<h1 class="title-text">PCP - Previsão de Vendas</h1>', unsafe_allow_html=True)
 
-# --- LÓGICA ---
-
+# Lógica
 uploaded_file = st.file_uploader("📂 Carregue seu arquivo Excel/CSV", type=['csv', 'xlsx'])
 
 if 'last_file' not in st.session_state: st.session_state.last_file = None
@@ -287,15 +292,13 @@ if uploaded_file:
     if not df_raw.empty:
         max_date = df_raw['Date'].max()
         
-        # Botão de Processamento
         col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
         with col_btn2:
             processar = st.button("🚀 Gerar Previsão", use_container_width=True)
 
         if processar:
-            with st.spinner("Calculando previsão (e obtendo clima)..."):
+            with st.spinner("Calculando previsão..."):
                 try:
-                    # Chama a função da Parte 1 que retorna (Previsão, Clima)
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=14)
                     
                     if not forecast_result.empty:
@@ -306,13 +309,11 @@ if uploaded_file:
                     st.error(f"Erro no cálculo: {e}")
                     st.write(traceback.format_exc())
 
-        # Exibição dos Resultados
         if st.session_state.get('has_run', False):
             forecast = st.session_state['forecast_data']
             weather_df = st.session_state.get('weather_data', pd.DataFrame())
             
-            # --- 1. BLOCO DE CLIMA (PRIORIDADE VISUAL) ---
-            # Garante que apareça antes do resumo
+            # --- 1. PREVISÃO DO TEMPO ---
             if not weather_df.empty:
                 st.divider()
                 st.subheader("🌤️ Previsão do Tempo (Próximos 7 Dias)")
@@ -329,15 +330,15 @@ if uploaded_file:
                 w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
                 
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
+            else:
+                st.warning("⚠️ Dados climáticos não disponíveis.")
             
-            # --- 2. CÁLCULO DO RESUMO EXECUTIVO ---
+            # --- 2. RESUMO EXECUTIVO ---
             f_start = max_date + timedelta(days=1)
-            f_end = max_date + timedelta(days=14)
-            
             ly_start = f_start - timedelta(weeks=52)
-            ly_end = f_end - timedelta(weeks=52)
+            ly_end = ly_start + timedelta(days=13)
             l2y_start = f_start - timedelta(weeks=104)
-            l2y_end = f_end - timedelta(weeks=104)
+            l2y_end = l2y_start + timedelta(days=13)
             
             hist_ly = df_raw[(df_raw['Date'] >= ly_start) & (df_raw['Date'] <= ly_end)]
             hist_2y = df_raw[(df_raw['Date'] >= l2y_start) & (df_raw['Date'] <= l2y_end)]
@@ -383,7 +384,7 @@ if uploaded_file:
             df_summary = pd.DataFrame(summary)
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
             
-            # --- 3. PREVISÃO DETALHADA ---
+            # --- 3. TABELA DETALHADA ---
             df_piv = forecast.pivot_table(
                 index=['SKU', 'Description', 'Group'], 
                 columns='Date', 
@@ -391,7 +392,6 @@ if uploaded_file:
                 aggfunc='sum'
             ).reset_index()
             
-            # Totais
             num_cols = df_piv.select_dtypes(include=[np.number]).columns
             total_data = df_piv[num_cols].sum().to_dict()
             total_data['SKU'] = 'TOTAL'
@@ -401,7 +401,6 @@ if uploaded_file:
             df_total = pd.DataFrame([total_data])
             df_piv = pd.concat([df_piv, df_total], ignore_index=True)
             
-            # Formata Colunas de Data
             cols_fmt = []
             for c in df_piv.columns:
                 if isinstance(c, pd.Timestamp):
@@ -414,18 +413,12 @@ if uploaded_file:
             st.dataframe(df_piv, use_container_width=True)
             
             # --- DOWNLOAD COM NOME DINÂMICO ---
-            # Pega data inicial e final da previsão para o nome do arquivo
             d_inicial = forecast['Date'].min().strftime('%d-%m-%Y')
             d_final = forecast['Date'].max().strftime('%d-%m-%Y')
             nome_arquivo = f"Previsao_{d_inicial}_a_{d_final}.csv"
             
             csv = df_piv.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Baixar Planilha", 
-                data=csv, 
-                file_name=nome_arquivo,  # <--- Nome alterado aqui
-                mime="text/csv"
-            )
+            st.download_button("📥 Baixar Planilha", csv, nome_arquivo, "text/csv")
 
             # --- 4. IA GEMINI ---
             st.divider()
@@ -465,18 +458,13 @@ if uploaded_file:
                         with st.spinner("Analisando..."):
                             prompt = f"""
                             Você é um analista sênior.
-                            
                             TABELA 1: COMPARATIVO ANUAL (Volume Total)
                             {tabela_anual_str}
-                            
                             TABELA 2: RITMO DE VENDAS (Média Diária)
                             {tabela_ritmo_str}
-                            
                             TABELA 3: TOP PRODUTOS
                             {top_sku}
-                            
                             Pergunta: {query}
-                            
                             Responda em português.
                             """
                             response = client.models.generate_content(
