@@ -191,8 +191,9 @@ def load_yield_data_scenarios(uploaded_file):
 @st.cache_data
 def load_availability_data(uploaded_file):
     try:
-        try: df = pd.read_csv(uploaded_file, header=2)
-        except: df = pd.read_excel(uploaded_file, header=2)
+        # AJUSTE PARA ARQUIVO SIMPLIFICADO: HEADER=1 (Linha 2 do Excel)
+        try: df = pd.read_csv(uploaded_file, header=1)
+        except: df = pd.read_excel(uploaded_file, header=1)
         df.columns = df.columns.str.strip()
         
         name_map = {
@@ -213,8 +214,16 @@ def load_availability_data(uploaded_file):
             df['Hortaliça_Traduzida'] = df['Hortaliça'].apply(translate_name)
             
             cols_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta']
+            # Filtra colunas que realmente existem (para evitar erro se sobrar espaço vazio)
             cols_existentes = [c for c in cols_dias if c in df.columns]
             
+            if not cols_existentes:
+                # Tenta achar colunas com espaço extra "Segunda "
+                for c in df.columns:
+                    if c.strip() in cols_dias:
+                        df.rename(columns={c: c.strip()}, inplace=True)
+                cols_existentes = [c for c in cols_dias if c in df.columns]
+
             df_grouped = df.groupby('Hortaliça_Traduzida')[cols_existentes].sum().reset_index()
             return df_grouped
         else:
@@ -280,19 +289,6 @@ def calculate_backtest_accuracy(df_raw):
         if train.empty or test.empty:
             return None, None, None
 
-        # Prepara dados (Features)
-        # Para backtest, precisamos gerar features considerando o passado como "futuro"
-        # Simplificação: Usamos generate_features no dataset completo e filtramos
-        
-        # Gerar features no dataset completo (com lacunas preenchidas se necessário, mas aqui assumimos continuidade)
-        # Para garantir lags corretos, pegamos um pedaço do treino + teste
-        # Idealmente, o teste deveria ser previsto sem ver o target. 
-        # Como usamos lags, o lag_1 do dia D depende do dia D-1. 
-        # Em previsão recursiva, usamos a previsão. Aqui para simplificar e ser rápido (índice),
-        # usaremos One-Step Ahead (usa dado real anterior) ou previsão direta se lags permitirem.
-        # Vamos fazer previsão direta simples usando o modelo treinado.
-        
-        # Treino
         unique_skus = df_clean[['SKU', 'Description', 'Group']].drop_duplicates()
         unique_skus['key'] = 1
         
@@ -303,14 +299,12 @@ def calculate_backtest_accuracy(df_raw):
         df_master = pd.merge(df_dates_full, unique_skus, on='key').drop('key', axis=1)
         df_master = pd.merge(df_master, df_clean[['Date','SKU','Orders']], on=['Date','SKU'], how='left').fillna(0)
         
-        # Features
         holidays_df = get_holidays_calendar(df_master['Date'].min(), df_master['Date'].max())
         df_master = pd.merge(df_master, holidays_df, on='Date', how='left')
         df_master['IsHoliday'] = df_master['IsHoliday'].fillna(0)
         df_master['IsHighImpact'] = df_master['IsHighImpact'].fillna(0)
         df_master['IsHighImpactNextDay'] = df_master['IsHighImpact'].shift(-1).fillna(0)
         
-        # Clima Histórico (Simplificado: Pega do get_weather se possível ou gera aleatório consistente)
         weather = get_weather_data(df_master['Date'].min(), df_master['Date'].max())
         if weather is not None:
              df_master = pd.merge(df_master, weather, on='Date', how='left')
@@ -325,21 +319,17 @@ def calculate_backtest_accuracy(df_raw):
         features = ['DayOfWeek', 'IsWeekend', 'IsHoliday', 'IsHighImpact', 'IsHighImpactNextDay', 'DayOfMonth', 'IsPaydayWeek', 'Temp_Avg', 'Rain_mm', 'lag_1', 'lag_7', 'roll_7']
         
         X_train = df_feat[df_feat['Date'] < start_test].dropna()
-        X_test = df_feat[df_feat['Date'] >= start_test].dropna() # Aqui usamos dados reais passados para lag, é um "Forecast com dados reais de entrada" (ex-post)
+        X_test = df_feat[df_feat['Date'] >= start_test].dropna() 
         
         if X_train.empty or X_test.empty: return None, None, None
         
-        # Modelo Rápido
         model = XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, n_jobs=-1, random_state=42)
         model.fit(X_train[features], X_train['Orders'])
         
         preds = model.predict(X_test[features])
         preds = np.maximum(np.round(preds, 0), 0)
         
-        # Métricas
         actuals = X_test['Orders'].values
-        
-        # WAPE (Weighted Absolute Percentage Error) - Melhor que MAPE para vendas com zeros ou volumes baixos
         sum_abs_error = np.sum(np.abs(actuals - preds))
         sum_actuals = np.sum(actuals)
         
@@ -499,7 +489,6 @@ if uploaded_file:
             processar = st.button("🚀 Gerar Planejamento Completo", use_container_width=True)
 
         if processar:
-            # --- 0. BACKTEST DE ACURÁCIA (NOVO) ---
             with st.spinner("Calculando precisão do modelo (Backtest 7 dias)..."):
                 acc, real_vol, pred_vol = calculate_backtest_accuracy(df_raw)
                 st.session_state['accuracy_metric'] = (acc, real_vol, pred_vol)
@@ -530,12 +519,11 @@ if uploaded_file:
                 w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
             
-            # --- 2. INDICADOR DE ACURÁCIA (NOVO) ---
+            # --- 2. INDICADOR DE ACURÁCIA ---
             st.divider()
             acc_data = st.session_state.get('accuracy_metric', (None, None, None))
             if acc_data[0] is not None:
                 acuracia, vol_real, vol_prev = acc_data
-                
                 kpi1, kpi2, kpi3 = st.columns(3)
                 kpi1.metric("Acuracidade Global (7d)", f"{acuracia*100:.1f}%", help="Baseado no WAPE dos últimos 7 dias")
                 kpi2.metric("Volume Real (7d)", f"{vol_real:,.0f} un")
@@ -565,10 +553,8 @@ if uploaded_file:
                 v_curr = forecast[forecast['Group'] == g]['Orders'].sum()
                 v_ly = hist_ly[hist_ly['Group'] == g]['Orders'].sum()
                 v_2y = hist_2y[hist_2y['Group'] == g]['Orders'].sum()
-                
                 p_ly = ((v_curr / v_ly) - 1) * 100 if v_ly > 0 else 0
                 p_2y = ((v_curr / v_2y) - 1) * 100 if v_2y > 0 else 0
-                
                 summary.append({
                     'Grupo': g,
                     'Previsão 7d': int(v_curr),
@@ -595,7 +581,7 @@ if uploaded_file:
             
             df_summary = pd.DataFrame(summary)
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
-            st.caption(f"ℹ️ As datas de comparação seguem a lógica de 'Semana Comercial' (Alinhamento por Dia da Semana) e não data exata de calendário.")
+            st.caption(f"ℹ️ As datas de comparação seguem a lógica de 'Semana Comercial' (Alinhamento por Dia da Semana).")
             
             # --- 4. PREVISÃO DETALHADA ---
             st.divider()
@@ -615,7 +601,6 @@ if uploaded_file:
                 st.divider()
                 st.subheader("🏭 Planejamento de Compras")
                 
-                # --- PARTE A: ALERTA DE PESO ---
                 df_recipe = load_recipe_data(uploaded_recipe)
                 if not df_recipe.empty:
                     df_check = df_recipe.copy()
@@ -629,7 +614,6 @@ if uploaded_file:
                             for index, row in alerts.iterrows():
                                 st.warning(f"🔴 **{row['SKU']}**: Rótulo {row['Label_Weight']:.0f}g vs Receita {row['Weight_g']:.0f}g (+{row['Diff_Pct']:.1f}%)")
                     
-                    # --- CÁLCULO DE NECESSIDADE (KG) ---
                     if 'Type' in df_recipe.columns:
                         mask_legume = df_recipe['Type'].astype(str).str.contains('Legume', case=False, na=False)
                         df_recipe = df_recipe[~mask_legume]
@@ -640,23 +624,18 @@ if uploaded_file:
                     df_mrp = pd.merge(forecast[mask_fore], df_recipe, on='SKU_Str', how='inner')
                     df_mrp['Total_Kg'] = (df_mrp['Orders'] * df_mrp['Weight_g']) / 1000
                     
-                    # --- DIVISÃO: RÍGIDO (Não Substitui) vs FLEXÍVEL (Substitui) ---
                     def check_rigid(row):
                         ing = str(row['Ingredient']).lower()
                         desc = str(row['Description']).lower()
                         return ing in desc
 
                     df_mrp['Is_Rigid'] = df_mrp.apply(check_rigid, axis=1)
-                    
-                    # Agrupa por Dia, Ingrediente E Tipo de Demanda
                     df_mrp['Date_Clean'] = df_mrp['Date'] 
                     
-                    # REGRA SÁBADO -> SEXTA (Aplica-se a todos)
                     df_mrp['DayNum'] = df_mrp['Date'].dt.dayofweek
                     mask_sat = df_mrp['DayNum'] == 5
                     df_mrp.loc[mask_sat, 'Date'] = df_mrp.loc[mask_sat, 'Date'] - timedelta(days=1)
                     
-                    # Agregação Híbrida
                     df_kg_daily = df_mrp.groupby(['Ingredient', 'Date', 'Is_Rigid'])['Total_Kg'].sum().unstack(fill_value=0).reset_index()
                     if True not in df_kg_daily.columns: df_kg_daily[True] = 0
                     if False not in df_kg_daily.columns: df_kg_daily[False] = 0
@@ -690,7 +669,6 @@ if uploaded_file:
                             df_proc = pd.merge(df_kg_daily, df_avail_melt, left_on=['Ingredient_Lower', 'DayName'], right_on=['Hortaliça_Lower', 'DayName'], how='left')
                             df_proc['Kg_Available'] = df_proc['Kg_Available'].fillna(0)
                             
-                            # FILTRO DATA DINÂMICO (Ignora passado)
                             today = pd.Timestamp.now().normalize()
                             df_proc = df_proc[df_proc['Date'] > today]
                             
@@ -764,7 +742,6 @@ if uploaded_file:
                                 
                                 df_calc['Boxes_Mkt'] = np.ceil(df_calc['Kg_Mkt'] / df_calc['Y_MKT'])
                                 
-                                # VISUALIZAÇÃO DIÁRIA (PIVOT) - CAIXAS DE COMPRA
                                 st.write(f"#### 🛒 Ordem de Compra Diária (Caixas Mercado - Cenário {scenario})")
                                 
                                 df_daily_view = df_calc.pivot_table(index='Ingredient', columns='Date', values='Boxes_Mkt', aggfunc='sum').fillna(0)
@@ -788,7 +765,7 @@ if uploaded_file:
                                     num_yield = audit_yield.select_dtypes(include=[np.number]).columns
                                     st.dataframe(audit_yield.style.format("{:.2f}", subset=num_yield))
 
-                                # SOBRAS DIÁRIAS
+                                # SOBRAS DIÁRIAS (FORMATADO CORRETAMENTE)
                                 df_surplus_daily = df_calc[df_calc['Sobra_VP'] > 0]
                                 if not df_surplus_daily.empty:
                                     with st.expander(f"🚜 Sobras Verde Prima (Visão Diária)", expanded=False):
@@ -799,6 +776,8 @@ if uploaded_file:
                                             d_str = d_str.replace('Mon', 'Seg').replace('Tue', 'Ter').replace('Wed', 'Qua').replace('Thu', 'Qui').replace('Fri', 'Sex')
                                             cols_s_fmt.append(d_str)
                                         df_surplus_view.columns = cols_s_fmt
+                                        
+                                        # Aplica formatação segura (apenas onde é float)
                                         st.dataframe(df_surplus_view.style.format("{:.1f}"), use_container_width=True)
 
                                 csv_order = df_daily_view.to_csv().encode('utf-8')
@@ -807,7 +786,7 @@ if uploaded_file:
                                 st.info("Sem demandas futuras para processar.")
 
                         else:
-                            st.warning("⚠️ Arquivos auxiliares inválidos.")
+                            st.warning("⚠️ Arquivos auxiliares inválidos ou vazios.")
                     else:
                         st.info("💡 Suba Rendimento e Disponibilidade para cálculo de caixas.")
                         df_kg_show = df_kg_daily.pivot_table(index='Ingredient', columns='Date', values='Total_Kg', aggfunc='sum').fillna(0)
