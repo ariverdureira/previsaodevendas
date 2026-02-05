@@ -7,7 +7,7 @@ import requests
 import holidays
 import traceback
 import re
-import unicodedata # Biblioteca nativa para lidar com acentos
+import unicodedata
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
@@ -20,7 +20,6 @@ def normalize_text(text):
     """Remove acentos e espaços, e coloca em minúsculo para garantir o match"""
     if not isinstance(text, str):
         return str(text)
-    # Normaliza unicode (ex: ç -> c, á -> a)
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII')
     return text.lower().strip()
 
@@ -98,7 +97,7 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
 
 def classify_group(desc):
     if not isinstance(desc, str): return 'Outros'
-    txt = normalize_text(desc) # Normaliza aqui também
+    txt = normalize_text(desc)
     if 'americana bola' in txt: return 'Americana Bola'
     vero_keys = ['vero', 'primavera', 'roxa', 'mix', 'repolho', 'couve', 'rucula hg']
     if any(x in txt for x in vero_keys): return 'Vero'
@@ -171,9 +170,7 @@ def load_yield_data_scenarios(uploaded_file):
         df = df[pd.to_numeric(df['Rendimento'], errors='coerce') > 0]
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
         
-        # Normalização rigorosa
         df['Produto'] = df['Produto'].apply(normalize_text)
-        
         df['Fornecedor'] = df['Fornecedor'].astype(str).str.strip().str.upper()
         df['Origem'] = np.where(df['Fornecedor'] == 'VERDE PRIMA', 'VP', 'MERCADO')
         
@@ -209,17 +206,15 @@ def load_availability_data(uploaded_file):
             'crespa verde': 'alface crespa',
             'frizzy roxa': 'frisee roxa',
             'lollo': 'lollo rossa',
-            'chicoria': 'frisee chicoria', # Sem acento na chave por causa do normalize
+            'chicoria': 'frisee chicoria',
+            'barlach': 'barlach', # Garante que barlach passe
         }
         
         if 'Hortaliça' in df.columns:
             df = df.dropna(subset=['Hortaliça'])
-            
-            # Normalização rigorosa
             df['Hortaliça_Norm'] = df['Hortaliça'].apply(normalize_text)
             
             def translate_name(name):
-                # O nome já entra normalizado (sem acento, minúsculo)
                 return name_map.get(name, name) 
             
             df['Hortaliça_Traduzida'] = df['Hortaliça_Norm'].apply(translate_name)
@@ -642,7 +637,7 @@ if uploaded_file:
                     mask_sat = df_mrp['DayNum'] == 5
                     df_mrp.loc[mask_sat, 'Date'] = df_mrp.loc[mask_sat, 'Date'] - timedelta(days=1)
                     
-                    df_mrp['Ingredient_Norm'] = df_mrp['Ingredient'].apply(normalize_text) # Normaliza aqui tb
+                    df_mrp['Ingredient_Norm'] = df_mrp['Ingredient'].apply(normalize_text) 
                     
                     df_kg_daily = df_mrp.groupby(['Ingredient_Norm', 'Ingredient', 'Date', 'Is_Rigid'])['Total_Kg'].sum().unstack(fill_value=0).reset_index()
                     if True not in df_kg_daily.columns: df_kg_daily[True] = 0
@@ -682,7 +677,7 @@ if uploaded_file:
                             
                             groups_sub = {
                                 'Frutas Verdes': ['alface crespa', 'escarola', 'frisee chicoria', 'lalique', 'romana'],
-                                'Frutas Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa']
+                                'Frutas Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa', 'barlach']
                             }
                             
                             log_substitutions = []
@@ -773,8 +768,8 @@ if uploaded_file:
                                     num_yield = audit_yield.select_dtypes(include=[np.number]).columns
                                     st.dataframe(audit_yield.style.format("{:.2f}", subset=num_yield))
 
-                                # DIAGNÓSTICO DE NOMES (NOVO)
-                                with st.expander("🔍 Diagnóstico de Nomes (Debug)", expanded=False):
+                                # DIAGNÓSTICO DE NOMES (COM DEBUG DE RÚCULA)
+                                with st.expander("🔍 Diagnóstico de Nomes e Match (Debug)", expanded=False):
                                     # Lista única da VP
                                     vp_items = set(df_avail['Hortaliça_Traduzida'].unique())
                                     # Lista única da Demanda
@@ -783,9 +778,15 @@ if uploaded_file:
                                     missing_in_demand = vp_items - dem_items
                                     if missing_in_demand:
                                         st.warning(f"Itens na VP sem match na Fábrica: {', '.join(missing_in_demand)}")
-                                        st.write("Se 'rucula' aparecer aqui, o erro de nome persiste.")
+                                    
+                                    st.write("--- Raio-X Rúcula ---")
+                                    # Filtra tudo que parece rúcula
+                                    df_rucula = df_calc[df_calc['Ingredient_Norm'].str.contains('rucula', na=False)]
+                                    if not df_rucula.empty:
+                                        cols_rucula = ['Date', 'Ingredient', 'Total_Kg', 'Kg_Available', 'Sobra_VP', 'Kg_Mkt']
+                                        st.dataframe(df_rucula[cols_rucula].style.format("{:.1f}", subset=['Total_Kg', 'Kg_Available', 'Sobra_VP', 'Kg_Mkt']))
                                     else:
-                                        st.success("Todos os itens da VP encontraram correspondência na Fábrica!")
+                                        st.write("Nenhuma linha de 'rucula' encontrada no cálculo final.")
 
                                 df_surplus_daily = df_calc[df_calc['Sobra_VP'] > 0]
                                 if not df_surplus_daily.empty:
