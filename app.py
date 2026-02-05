@@ -10,10 +10,10 @@ import traceback
 from sklearn.metrics import mean_absolute_percentage_error
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PCP Verdureira - Industrial Intelligence v7.8", layout="wide")
+st.set_page_config(page_title="PCP Verdureira - Rastreabilidade 48h v8.2", layout="wide")
 
 # ==============================================================================
-# 1. MOTOR DE INTELIGÊNCIA (CLIMA, FERIADOS E PAGAMENTO)
+# 1. MOTOR DE INTELIGÊNCIA (CLIMA COMPLETO, FERIADOS E PAGAMENTO)
 # ==============================================================================
 
 @st.cache_data(ttl=3600)
@@ -60,6 +60,13 @@ def get_smart_calendar(start_date, end_date):
 # 2. CARGA E TRATAMENTO DE DADOS
 # ==============================================================================
 
+def normalize_name(name):
+    if pd.isna(name): return ""
+    n = str(name).lower().strip()
+    n = n.replace("alface ", "").replace("mini ", "").replace("verde", "").strip()
+    if n in ['lollo', 'lollo roxa']: n = 'lollo rossa'
+    return n
+
 def clean_excel(df):
     df = df.loc[:, ~df.columns.duplicated()].copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -70,34 +77,31 @@ def clean_excel(df):
 
 @st.cache_data
 def load_all_pcp_data(f_v, f_r, f_y, f_a):
-    name_fix = {'lollo': 'lollo rossa'}
-    
-    dv = clean_excel(pd.read_excel(f_v) if f_v.name.endswith('xlsx') else pd.read_csv(f_v, sep=None, engine='python'))
-    dv = dv.rename(columns={'Data':'Date','Dia':'Date','Cod':'SKU','Cod- SKU':'SKU','Código':'SKU','Pedidos':'Orders','Qtde':'Orders','Produto.DS_PRODUTO':'Description','Descrição do código':'Description','Descrição':'Description'})
+    dv = clean_excel(pd.read_excel(f_v))
+    rename_v = {'Data':'Date','Dia':'Date','Cod':'SKU','Cod- SKU':'SKU','Código':'SKU','Pedidos':'Orders','Qtde':'Orders','Produto.DS_PRODUTO':'Description','Descrição do código':'Description','Descrição':'Description'}
+    dv = dv.rename(columns=rename_v)
     dv['SKU'] = dv['SKU'].astype(str).str.strip().str.upper()
-    dv['Description'] = dv['Description'].astype(str).str.strip()
     dv['Date'] = pd.to_datetime(dv['Date'], errors='coerce')
     dv = dv.dropna(subset=['Date', 'SKU'])
-    dv['Orders'] = pd.to_numeric(dv['Orders'], errors='coerce').fillna(0)
-
+    
     dr = clean_excel(pd.read_excel(f_r))
     dr = dr.rename(columns={'Cod': 'SKU', 'Materia Prima': 'Ingredient', 'Composição (mg)': 'Comp_mg'})
     dr['SKU'] = dr['SKU'].astype(str).str.strip().str.upper()
     for col in ['Ingredient', 'A', 'B', 'C']:
         if col in dr.columns:
-            dr[col] = dr[col].astype(str).str.lower().str.strip().replace(name_fix)
+            dr[col+'_Norm'] = dr[col].apply(normalize_name)
 
     dy = clean_excel(pd.read_excel(f_y))
     dy['Data'] = pd.to_datetime(dy['Data'], errors='coerce')
-    dy['Produto_Low'] = dy['Produto'].astype(str).str.lower().str.strip().replace(name_fix)
+    dy['Produto_Norm'] = dy['Produto'].apply(normalize_name)
 
     da = clean_excel(pd.read_excel(f_a, header=1))
-    da['Hortaliça'] = da['Hortaliça'].astype(str).str.lower().str.strip().replace(name_fix)
+    da['Hort_Norm'] = da['Hortaliça'].apply(normalize_name)
     
     return dv, dr, dy, da
 
 # ==============================================================================
-# 3. MOTOR DE PREVISÃO (XGBOOST)
+# 3. MOTOR DE PREVISÃO (XGBOOST INTELIGENTE)
 # ==============================================================================
 
 def run_ml_forecast(dv):
@@ -105,29 +109,26 @@ def run_ml_forecast(dv):
     def classify(desc):
         txt = str(desc).lower()
         if 'americana' in txt: return 'Americana Bola'
-        if any(x in txt for x in ['vero', 'primavera', 'roxa', 'mix']): return 'Vero'
+        if any(x in txt for x in ['vero', 'primavera', 'roxa']): return 'Vero'
         if 'mini' in txt: return 'Minis'
-        if any(x in txt for x in ['cenoura', 'beterraba', 'abobrinha', 'batata', 'legume']): return 'Legumes'
         return 'Saladas'
     df['Group'] = df['Description'].apply(classify)
     
     mask_vero = (df['Group'] == 'Vero') & (df['Date'] >= '2025-01-01')
     mask_others = (df['Group'] != 'Vero')
-    df_train_full = df[mask_vero | mask_others].copy()
+    df_train = df[mask_vero | mask_others].copy()
     
     last_date = df['Date'].max()
-    df_cal = get_smart_calendar(df_train_full['Date'].min(), last_date + timedelta(days=7))
-    df_train_full = pd.merge(df_train_full, df_cal, on='Date', how='left')
+    df_cal = get_smart_calendar(df_train['Date'].min(), last_date + timedelta(days=7))
+    df_train = pd.merge(df_train, df_cal, on='Date', how='left')
     
-    df_train_full['DayOfWeek'] = df_train_full['Date'].dt.dayofweek
-    df_train_full['lag_7'] = df_train_full.groupby('SKU')['Orders'].shift(7)
-    df_train_full['lag_14'] = df_train_full.groupby('SKU')['Orders'].shift(14)
+    df_train['DayOfWeek'] = df_train['Date'].dt.dayofweek
+    df_train['lag_7'] = df_train.groupby('SKU')['Orders'].shift(7)
+    df_train['lag_14'] = df_train.groupby('SKU')['Orders'].shift(14)
     
     features = ['DayOfWeek', 'lag_7', 'lag_14', 'IsHoliday', 'Holiday_Eve', 'Is_Payday_Week', 'Temp_Max']
     model = XGBRegressor(n_estimators=250, learning_rate=0.04, max_depth=6)
-    
-    train_clean = df_train_full.dropna(subset=['lag_7', 'lag_14'])
-    model.fit(train_clean[features], train_clean['Orders'])
+    model.fit(df_train.dropna(subset=['lag_7', 'lag_14'])[features], df_train.dropna(subset=['lag_7', 'lag_14'])['Orders'])
     
     future_range = pd.date_range(last_date + timedelta(days=1), last_date + timedelta(days=7))
     unique_skus = df[['SKU', 'Description', 'Group']].drop_duplicates()
@@ -145,17 +146,16 @@ def run_ml_forecast(dv):
             temp = pd.merge(temp, l_val, on='SKU', how='left')
         temp = temp.fillna(0)
         temp['Orders'] = np.maximum(0, np.round(model.predict(temp[features])))
-        # REGRA: Domingo e Feriado não faturam
         if d.dayofweek == 6 or temp['IsHoliday'].iloc[0] == 1: temp['Orders'] = 0
         preds_fut.append(temp)
         
-    return pd.concat(preds_fut), df_train_full, df_cal[df_cal['Date'] > last_date]
+    return pd.concat(preds_fut), df_train, df_cal[df_cal['Date'] > last_date]
 
 # ==============================================================================
-# 4. INTERFACE E LÓGICA PCP (v7.8)
+# 4. INTERFACE E LÓGICA DE ABASTECIMENTO (POOL 48H FIFO)
 # ==============================================================================
 
-st.title("🌱 Verdureira Agroindústria - Intelligence PCP v7.8")
+st.title("🌱 Verdureira Agroindústria - PCP Inteligente v8.2")
 
 u1, u2 = st.columns(2)
 with u1:
@@ -169,158 +169,167 @@ if f_vendas and f_ficha and f_rend and f_avail:
     dv, dr, dy, da = load_all_pcp_data(f_vendas, f_ficha, f_rend, f_avail)
     scenario_name = st.radio("Cenário de Rendimento:", ["Reativo (1)", "Equilibrado (3)", "Conservador (5)"], index=1, horizontal=True)
     
-    if st.button("🚀 Gerar Planejamento Completo"):
-        with st.spinner("Calculando demanda e esgotando colheita própria..."):
-            # 1. FORECAST E CLIMA
+    if st.button("🚀 Gerar Planejamento de Fábrica"):
+        with st.spinner("Motor de Inteligência e Lotes 48h processando..."):
             forecast, df_hist, weather_fut = run_ml_forecast(dv)
             
+            # --- 1. CLIMA ---
             st.divider()
-            st.subheader("🌤️ Previsão do Tempo (Próximos 7 Dias)")
+            st.subheader("🌤️ Previsão do Tempo")
             w_disp = weather_fut[['Date', 'Temp_Min', 'Temp_Max', 'Chuva_mm']].copy()
             w_disp['Date'] = w_disp['Date'].dt.strftime('%d/%m (%a)')
-            w_disp.columns = ['Data', 'Min (°C)', 'Max (°C)', 'Chuva (mm)']
-            st.dataframe(w_disp.set_index('Data').T, use_container_width=True)
+            st.dataframe(w_disp.set_index('Date').T, use_container_width=True)
             
-            # 2. RESUMO EXECUTIVO
+            # --- 2. RESUMO EXECUTIVO ---
             st.subheader("📊 Resumo Executivo (Comparativo Semana Comercial)")
             f_s = forecast['Date'].min()
             ly_s, l2y_s = f_s - timedelta(days=364), f_s - timedelta(days=728)
-            
-            summary_list = []
-            for g in ['Americana Bola', 'Vero', 'Saladas', 'Legumes', 'Minis']:
+            res_list = []
+            for g in ['Americana Bola', 'Vero', 'Saladas', 'Minis']:
                 v_curr = forecast[forecast['Group'] == g]['Orders'].sum()
                 v_ly = df_hist[(df_hist['Date'].between(ly_s, ly_s+timedelta(days=6))) & (df_hist['Group'] == g)]['Orders'].sum()
                 v_l2y = df_hist[(df_hist['Date'].between(l2y_s, l2y_s+timedelta(days=6))) & (df_hist['Group'] == g)]['Orders'].sum()
-                
-                summary_list.append({
-                    'Grupo': g, 
-                    'Prev 2026': int(v_curr), 
-                    'Real 2025': int(v_ly),
-                    'Var % (25)': f"{((v_curr/v_ly)-1)*100:+.1f}%" if v_ly > 0 else "0%",
-                    'Real 2024': int(v_l2y),
-                    'Var % (24)': f"{((v_curr/v_l2y)-1)*100:+.1f}%" if v_l2y > 0 else "0%"
-                })
-            
-            df_exec = pd.DataFrame(summary_list)
-            t_curr, t_ly, t_l2y = df_exec['Prev 2026'].sum(), df_exec['Real 2025'].sum(), df_exec['Real 2024'].sum()
-            total_row = pd.DataFrame([{'Grupo': 'TOTAL GERAL', 'Prev 2026': int(t_curr), 'Real 2025': int(t_ly), 'Var % (25)': f"{((t_curr/t_ly)-1)*100:+.1f}%" if t_ly > 0 else "0%", 'Real 2024': int(t_l2y), 'Var % (24)': f"{((t_curr/t_l2y)-1)*100:+.1f}%" if t_l2y > 0 else "0%"}])
-            st.table(pd.concat([df_exec, total_row], ignore_index=True))
+                res_list.append({'Grupo': g, 'IA 2026': int(v_curr), 'Real 2025': int(v_ly), 'Var %': f"{((v_curr/v_ly)-1)*100:+.1f}%" if v_ly > 0 else "0%", 'Real 2024': int(v_l2y)})
+            df_exec = pd.DataFrame(res_list)
+            st.table(df_exec)
 
-            # 3. PREVISÃO SKU NA TELA
-            st.subheader("🗓️ Detalhamento da Previsão de Vendas (Unidades)")
+            # --- 3. PREVISÃO SKU ---
+            st.subheader("🗓️ Previsão SKU/Dia (Unidades)")
             pivot_fore = forecast.pivot_table(index=['SKU', 'Description'], columns='Date', values='Orders', aggfunc='sum').fillna(0)
-            map_dias = {0:'Seg', 1:'Ter', 2:'Qua', 3:'Qui', 4:'Sex', 5:'Sáb', 6:'Dom'}
-            pivot_fore.columns = [f"{c.strftime('%d/%m')} ({map_dias[c.dayofweek]})" for c in pivot_fore.columns]
             st.dataframe(pivot_fore.astype(int), use_container_width=True)
-            st.download_button("📥 Exportar Previsão de Vendas (CSV)", pivot_fore.to_csv().encode('utf-8'), "previsao_vendas.csv", "text/csv")
+            st.download_button("📥 Baixar Previsão CSV", pivot_fore.to_csv().encode('utf-8'), "previsao.csv", "text/csv")
 
-            # 4. MRP
+            # --- 4. CASCATA PCP COM ROLAGEM E RASTREABILIDADE ---
             mrp = pd.merge(forecast, dr, on='SKU', how='inner')
             mrp['Total_Kg'] = (mrp['Orders'] * pd.to_numeric(mrp['Comp_mg'], errors='coerce')) / 1000
-            mrp['Is_Rigid'] = mrp.apply(lambda r: str(r['Ingredient']).lower() in str(r['Description']).lower(), axis=1)
+            mrp['Is_Rigid'] = mrp.apply(lambda r: normalize_name(r['Ingredient']) in normalize_name(r['Description']), axis=1)
             
-            # SÁBADO -> SEXTA
-            mrp['Date_PCP'] = mrp['Date']
-            mrp.loc[mrp['Date'].dt.dayofweek == 5, 'Date_PCP'] = mrp['Date'] - timedelta(days=1)
-            need_daily = mrp.groupby(['Date_PCP', 'Ingredient', 'Is_Rigid', 'A', 'B', 'C'])['Total_Kg'].sum().reset_index()
+            # Sábado -> Sexta
+            mrp['Date_Calc'] = mrp['Date']
+            mrp.loc[mrp['Date'].dt.dayofweek == 5, 'Date_Calc'] = mrp['Date'] - timedelta(days=1)
+            need_daily = mrp.groupby(['Date_Calc', 'Ingredient_Norm', 'Is_Rigid', 'A_Norm', 'B_Norm', 'C_Norm', 'Ingredient'])['Total_Kg'].sum().reset_index()
 
-            # 5. DISPONIBILIDADE E RENDIMENTO
-            da_clean = da.groupby('Hortaliça')[['Segunda','Terça','Quarta','Quinta','Sexta']].sum().reset_index()
-            map_dias_ext = {0:'Segunda', 1:'Terça', 2:'Quarta', 3:'Quinta', 4:'Sexta', 5:'Sábado', 6:'Domingo'}
-            
+            da_clean = da.groupby('Hort_Norm')[['Segunda','Terça','Quarta','Quinta','Sexta']].sum().reset_index()
             y_map = []
-            for (prod, forn), g in dy.groupby(['Produto_Low', 'Fornecedor']):
+            for (prod, forn), g in dy.groupby(['Produto_Norm', 'Fornecedor']):
                 g = g.sort_values('Data', ascending=False)
-                if "1" in scenario_name: val = g['Rendimento'].iloc[0]
-                elif "3" in scenario_name: val = g['Rendimento'].head(3).mean()
-                else: val = g['Rendimento'].head(5).mean()
-                y_map.append({'Produto': prod, 'Origem': 'VP' if 'VERDE' in str(forn).upper() else 'MKT', 'Y_Val': val})
-            df_y_final = pd.DataFrame(y_map)
+                val = g['Rendimento'].iloc[0] if "1" in scenario_name else (g['Rendimento'].head(3).mean() if "3" in scenario_name else g['Rendimento'].head(5).mean())
+                y_map.append({'Produto_Norm': prod, 'Origem': 'VP' if 'VERDE' in str(forn).upper() else 'MKT', 'Y_Val': val})
+            df_y_f = pd.DataFrame(y_map)
 
-            # 6. CASCATA DE SUBSTITUIÇÃO (FIX: SOBRA DOMINGO)
+            # ESTRUTURAS DE CONTROLE
+            pool_estoque = {} # {item: [{'qty', 'expiry', 'added_on'}]}
             sub_log = []
+            rollover_log = [] # Para o novo relatório de 24h/48h
             final_rows = []
+            map_dias_ext = {0:'Segunda', 1:'Terça', 2:'Quarta', 3:'Quinta', 4:'Sexta', 5:'Sábado', 6:'Domingo'}
             groups_sub = {
-                'Verdes': ['alface crespa', 'escarola', 'frisee chicória', 'lalique', 'romana', 'espinafre', 'mini lisa'],
+                'Verdes': ['crespa', 'escarola', 'chicória', 'frisee chicória', 'lalique', 'romana', 'espinafre', 'mini lisa', 'agrião', 'mini agrião'],
                 'Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa']
             }
-            
-            for date, g_date in need_daily.groupby('Date_PCP'):
+
+            for date, g_date in need_daily.sort_values('Date_Calc').groupby('Date_Calc'):
                 day_name = map_dias_ext[date.dayofweek]
                 
-                # --- FIX: TRAVA DE FIM DE SEMANA ---
-                # Se for Sábado ou Domingo, a disponibilidade real na VP é 0
-                # Pois a necessidade do sábado já foi puxada para a sexta.
-                if day_name in ['Sábado', 'Domingo']:
-                    stock_map = {} # Zera estoque VP
-                else:
-                    if day_name not in da_clean.columns: day_name = 'Sexta' # Mirroring básico Seg-Sex
-                    y_vp = df_y_final[df_y_final['Origem'] == 'VP'].rename(columns={'Y_Val': 'Y_VP'})
-                    vp_stock_raw = da_clean[['Hortaliça', day_name]].copy().rename(columns={day_name: 'Boxes', 'Hortaliça': 'Hort_Low'})
-                    vp_stock = pd.merge(vp_stock_raw, y_vp, left_on='Hort_Low', right_on='Produto', how='left')
-                    vp_stock['Kg_Avail'] = vp_stock['Boxes'] * vp_stock['Y_VP'].fillna(10.0)
-                    stock_map = vp_stock.set_index('Hort_Low')['Kg_Avail'].to_dict()
+                # Snapshot do Rollover ANTES da nova colheita (O que sobrou de ontem)
+                for item, lots in pool_estoque.items():
+                    qty_24h = sum(l['qty'] for l in lots if l['expiry'] == date + timedelta(days=1))
+                    qty_48h = sum(l['qty'] for l in lots if l['expiry'] == date)
+                    if qty_24h > 0 or qty_48h > 0:
+                        rollover_log.append({'Data': date.strftime('%d/%m'), 'Item': item, 'Sobra_24h': round(qty_24h,1), 'Sobra_48h': round(qty_48h,1)})
 
-                # Processamento da Cascata (A -> B -> C -> Frutas)
+                # 1. Adicionar Nova Colheita (Validade 48h)
+                if day_name not in ['Sábado', 'Domingo']:
+                    target_col = day_name if day_name in da_clean.columns else 'Sexta'
+                    y_vp = df_y_f[df_y_f['Origem'] == 'VP'].rename(columns={'Y_Val': 'Y_VP'})
+                    col_raw = da_clean[['Hort_Norm', target_col]].copy().rename(columns={target_col: 'Boxes', 'Hort_Norm': 'Produto_Norm'})
+                    col_kg = pd.merge(col_raw, y_vp, on='Produto_Norm', how='left')
+                    col_kg['Kg'] = col_kg['Boxes'] * col_kg['Y_VP'].fillna(10.0)
+                    
+                    for _, row_c in col_kg.iterrows():
+                        item = row_c['Produto_Norm']
+                        if item not in pool_estoque: pool_estoque[item] = []
+                        if row_c['Kg'] > 0:
+                            pool_estoque[item].append({'qty': row_c['Kg'], 'expiry': date + timedelta(days=2)})
+
+                # 2. Limpeza de Expirados
+                for item in pool_estoque:
+                    pool_estoque[item] = [l for l in pool_estoque[item] if l['expiry'] > date and l['qty'] > 0]
+
+                # Função de Consumo FIFO
+                def consume_fifo(item_name, amount):
+                    if item_name not in pool_estoque: return 0
+                    taken = 0
+                    # Ordena por expiry para comer o mais velho primeiro
+                    pool_estoque[item_name] = sorted(pool_estoque[item_name], key=lambda x: x['expiry'])
+                    for lot in pool_estoque[item_name]:
+                        if amount <= 0: break
+                        draw = min(lot['qty'], amount)
+                        lot['qty'] -= draw
+                        amount -= draw
+                        taken += draw
+                    return taken
+
+                # 3. Cascata de Consumo
                 for idx, row in g_date.iterrows():
-                    ing = str(row['Ingredient']).lower().strip()
+                    ing = row['Ingredient_Norm']
                     needed = row['Total_Kg']
-                    used_a = min(stock_map.get(ing, 0), needed)
-                    stock_map[ing] = stock_map.get(ing, 0) - used_a
-                    needed -= used_a
-                    if not row['Is_Rigid']:
-                        for alt in ['B', 'C']:
-                            if needed > 0 and str(row[alt]).lower() != 'nan':
-                                ing_alt = str(row[alt]).lower().strip()
-                                used_alt = min(stock_map.get(ing_alt, 0), needed)
-                                stock_map[ing_alt] = stock_map.get(ing_alt, 0) - used_alt
-                                if used_alt > 0: sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': row[alt], 'Kg': round(used_alt, 1), 'Origem': f'Receita {alt}'})
-                                needed -= used_alt
-                    g_date.at[idx, 'Deficit_Pos_Receita'] = needed
+                    # A
+                    draw = consume_fifo(ing, needed)
+                    needed -= draw
+                    # B/C
+                    if not row['Is_Rigid'] and needed > 0:
+                        for alt in ['B_Norm', 'C_Norm']:
+                            if needed > 0 and str(row[alt]) != "":
+                                draw_alt = consume_fifo(row[alt], needed)
+                                if draw_alt > 0: sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': row[alt], 'Kg': round(draw_alt, 1), 'Origem': f'Receita {alt}'})
+                                needed -= draw_alt
+                    g_date.at[idx, 'Def_Pos_Rec'] = needed
 
+                # 4. Grupo de Frutas
                 for g_name, members in groups_sub.items():
-                    mask = g_date['Ingredient'].str.lower().str.strip().isin(members) & (~g_date['Is_Rigid'])
+                    mask = g_date['Ingredient_Norm'].isin(members) & (~g_date['Is_Rigid'])
                     for idx, row in g_date[mask].iterrows():
-                        needed = row['Deficit_Pos_Receita']
+                        needed = row['Def_Pos_Rec']
                         if needed > 0:
                             for m in members:
-                                if stock_map.get(m, 0) > 0 and needed > 0:
-                                    take = min(stock_map[m], needed)
-                                    stock_map[m] -= take
-                                    needed -= take
-                                    sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': m, 'Kg': round(take, 1), 'Origem': 'Grupo '+g_name})
-                        g_date.at[idx, 'Deficit_Final'] = max(0, needed)
-                    
-                g_date['Deficit_Final'] = g_date['Deficit_Final'].fillna(g_date['Deficit_Pos_Receita'])
-                g_date['Sobra_Fazenda'] = g_date['Ingredient'].str.lower().str.strip().map(stock_map).fillna(0)
+                                if needed <= 0: break
+                                draw_g = consume_fifo(m, needed)
+                                if draw_g > 0:
+                                    sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': m, 'Kg': round(draw_g, 1), 'Origem': 'Grupo '+g_name})
+                                    needed -= draw_g
+                        g_date.at[idx, 'Def_Final'] = max(0, needed)
+                
+                g_date['Def_Final'] = g_date['Def_Final'].fillna(g_date['Def_Pos_Rec'])
+                g_date['Sobra_Fazenda'] = g_date['Ingredient_Norm'].apply(lambda x: sum([l['qty'] for l in pool_estoque.get(x, [])]))
+                
+                # Zera pool no fim de semana
+                if day_name == 'Domingo': pool_estoque = {}
+                
                 final_rows.append(g_date)
 
             df_final = pd.concat(final_rows)
-            y_mkt = df_y_final[df_y_final['Origem'] == 'MKT'].groupby('Produto')['Y_Val'].mean().reset_index().rename(columns={'Y_Val': 'Y_MKT'})
-            df_final = pd.merge(df_final, y_mkt, left_on=df_final['Ingredient'].str.lower().str.strip(), right_on='Produto', how='left')
-            df_final['Boxes_Buy'] = np.ceil(df_final['Deficit_Final'] / df_final['Y_MKT'].fillna(10.0))
+            y_mkt = df_y_f[df_y_f['Origem'] == 'MKT'].groupby('Produto_Norm')['Y_Val'].mean().reset_index().rename(columns={'Y_Val': 'Y_MKT'})
+            df_final = pd.merge(df_final, y_mkt, on='Produto_Norm', how='left')
+            df_final['Boxes_Buy'] = np.ceil(df_final['Def_Final'] / df_final['Y_MKT'].fillna(10.0))
 
-            # --- 7. EXIBIÇÃO FINAL ---
+            # --- 5. EXIBIÇÃO DE RESULTADOS ---
             st.divider()
-            st.subheader("🛒 Ordem de Compra de Mercado (Caixas - D+1)")
-            today_ts = pd.Timestamp.now().normalize()
-            pivot_buy = df_final[df_final['Date_PCP'] > today_ts].pivot_table(index='Ingredient', columns='Date_PCP', values='Boxes_Buy', aggfunc='sum').fillna(0)
-            pivot_buy.columns = [f"{c.strftime('%d/%m')} ({map_dias[c.dayofweek]})" for c in pivot_buy.columns]
+            st.subheader("🛒 Ordem de Compra de Mercado (Caixas)")
+            pivot_buy = df_final[df_final['Date_Calc'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date_Calc', values='Boxes_Buy', aggfunc='sum').fillna(0)
+            pivot_buy.columns = [f"{c.strftime('%d/%m')} ({map_dias_ext[c.dayofweek][:3]})" for c in pivot_buy.columns]
             st.dataframe(pivot_buy.astype(int), use_container_width=True)
-            st.download_button("📥 Exportar Ordem de Compra (CSV)", pivot_buy.to_csv().encode('utf-8'), "ordem_compra.csv", "text/csv")
+            st.download_button("📥 Baixar Ordem de Compra (CSV)", pivot_buy.to_csv().encode('utf-8'), "ordem_compra.csv", "text/csv")
 
-            col_rel1, col_rel2 = st.columns(2)
-            with col_rel1:
-                st.subheader("🚜 Sobras Verde Prima (Kg)")
-                # Filtra apenas sobras reais (acima de 0.1kg)
-                pivot_sobra = df_final[df_final['Date_PCP'] > today_ts].pivot_table(index='Ingredient', columns='Date_PCP', values='Sobra_Fazenda', aggfunc='sum').fillna(0)
-                pivot_sobra = pivot_sobra[pivot_sobra.sum(axis=1) > 0.1]
-                st.dataframe(pivot_sobra.style.format("{:.1f}"), use_container_width=True)
-            
-            with col_rel2:
-                st.subheader("🔄 Log de Substituições")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.subheader("🚜 Sobras Finais na Fazenda (Kg)")
+                pivot_sobra = df_final[df_final['Date_Calc'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date_Calc', values='Sobra_Fazenda', aggfunc='sum').fillna(0)
+                st.dataframe(pivot_sobra[pivot_sobra.sum(axis=1) > 0.1].style.format("{:.1f}"), use_container_width=True)
+            with col_b:
+                st.subheader("📋 Relatórios de Auditoria")
+                if rollover_log:
+                    st.download_button("📥 Exportar Relatório de Rolagem (24h/48h)", pd.DataFrame(rollover_log).to_csv().encode('utf-8'), "relatorio_rolagem.csv", "text/csv")
+                    st.caption("O relatório de rolagem detalha quanto estoque de 'ontem' e 'anteontem' foi disponibilizado para o dia.")
                 if sub_log:
                     st.download_button("📥 Exportar Log de Substituições (CSV)", pd.DataFrame(sub_log).to_csv().encode('utf-8'), "log_substituicoes.csv", "text/csv")
-                    st.info(f"Substituições inteligentes realizadas para otimizar o campo.")
-                else:
-                    st.info("Nenhuma substituição necessária.")
