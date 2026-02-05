@@ -8,34 +8,27 @@ import holidays
 import traceback
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PCP Verdureira - Eficiência em Perecíveis", layout="wide")
+st.set_page_config(page_title="PCP Verdureira - Inteligência Máxima", layout="wide")
 
 # ==============================================================================
-# 1. MOTOR DE INTELIGÊNCIA (CONTEXTO DE DEMANDA)
+# 1. MOTOR DE INTELIGÊNCIA (CLIMA, FERIADOS E PAGAMENTO)
 # ==============================================================================
 
 def get_smart_calendar(start_date, end_date):
-    """Gera contexto para a IA: Feriados, Clima e Ciclo de Pagamento"""
+    """Gera contexto para a IA: Feriados (Vizinhança), Clima e Ciclo de Pagamento"""
     br_holidays = holidays.Brazil(subdiv='SP')
     df_cal = pd.DataFrame({'Date': pd.date_range(start_date, end_date)})
     
-    # Feriados e Vizinhança Nervosa (Picos de Véspera)
+    # Feriados e Vizinhança Nervosa (Picos de Véspera e Ressaca)
     df_cal['IsHoliday'] = df_cal['Date'].apply(lambda x: 1 if x in br_holidays else 0)
     df_cal['Holiday_Eve'] = df_cal['IsHoliday'].shift(-1).fillna(0)
     df_cal['Holiday_Eve_2'] = df_cal['IsHoliday'].shift(-2).fillna(0)
+    df_cal['Holiday_After'] = df_cal['IsHoliday'].shift(1).fillna(0)
     
-    # Datas Especiais (Dia das Mães/Pais)
-    def check_special(d):
-        if (d.month == 5 or d.month == 8) and d.weekday() == 6:
-            if 7 < d.day <= 14: return 1
-        return 0
-    df_cal['IsSpecialEvent'] = df_cal['Date'].apply(check_special)
-    df_cal['Special_Eve'] = df_cal['IsSpecialEvent'].shift(-1).fillna(0) | df_cal['IsSpecialEvent'].shift(-2).fillna(0)
-
-    # Ciclo de Pagamento (Pico de demanda de supermercado)
+    # Ciclo de Pagamento (Poder de compra do consumidor)
     df_cal['Is_Payday_Week'] = df_cal['Date'].dt.day.between(5, 12).astype(int)
     
-    # Clima (Influencia direta no consumo de saladas)
+    # Clima (Correlação com consumo de saladas)
     try:
         url = "https://api.open-meteo.com/v1/forecast"
         params = {"latitude": -23.55, "longitude": -46.63, "daily": ["temperature_2m_max", "precipitation_sum"],
@@ -49,13 +42,42 @@ def get_smart_calendar(start_date, end_date):
     return df_cal.fillna(0)
 
 # ==============================================================================
-# 2. MOTOR DE PREVISÃO (XGBOOST - O CÉREBRO)
+# 2. CARGA E PADRONIZAÇÃO DE DADOS (EVITA KEYERROR)
 # ==============================================================================
 
-def run_lean_forecast(df_v):
-    df = df_v.copy()
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df = df.dropna(subset=['Date'])
+@st.cache_data
+def load_and_standardize(f_v, f_r, f_y, f_a):
+    # VENDAS
+    dv = pd.read_excel(f_v) if f_v.name.endswith('xlsx') else pd.read_csv(f_v, sep=None, engine='python')
+    dv.columns = dv.columns.str.strip()
+    dv = dv.rename(columns={'Data':'Date', 'Dia':'Date', 'Cod- SKU':'SKU', 'Código':'SKU', 'Pedidos':'Orders', 'Qtde':'Orders', 'Produto.DS_PRODUTO':'Description', 'Descrição':'Description'})
+    dv['Date'] = pd.to_datetime(dv['Date'], errors='coerce')
+    dv = dv.dropna(subset=['Date'])
+
+    # FICHA TÉCNICA
+    dr = pd.read_excel(f_r) if f_r.name.endswith('xlsx') else pd.read_csv(f_r, sep=None, engine='python')
+    dr.columns = dr.columns.str.strip()
+    if 'Cod' in dr.columns: dr = dr.rename(columns={'Cod': 'SKU'})
+    dr = dr.rename(columns={'Materia Prima': 'Ingredient', 'Composição (mg)': 'Weight_g'})
+    dr['SKU'] = dr['SKU'].astype(str).str.strip()
+
+    # RENDIMENTO
+    dy = pd.read_excel(f_y) if f_y.name.endswith('xlsx') else pd.read_csv(f_y, sep=None, engine='python')
+    dy.columns = dy.columns.str.strip()
+    dy['Data'] = pd.to_datetime(dy['Data'], errors='coerce')
+
+    # DISPONIBILIDADE VP
+    da = pd.read_excel(f_a, header=2)
+    da.columns = da.columns.str.strip()
+    
+    return dv, dr, dy, da
+
+# ==============================================================================
+# 3. MOTOR DE PREVISÃO (XGBOOST - CÉREBRO)
+# ==============================================================================
+
+def run_pcp_forecast(dv):
+    df = dv.copy()
     
     def classify(desc):
         txt = str(desc).lower()
@@ -64,7 +86,7 @@ def run_lean_forecast(df_v):
         return 'Saladas'
     df['Group'] = df['Description'].apply(classify)
     
-    # Novo Normal Vero (Base de aprendizado curta)
+    # Novo Normal Vero (Base 2025+)
     mask_vero = (df['Group'] == 'Vero') & (df['Date'] >= '2025-01-01')
     mask_others = (df['Group'] != 'Vero')
     df_train = df[mask_vero | mask_others].copy()
@@ -78,12 +100,12 @@ def run_lean_forecast(df_v):
     df_train['lag_7'] = df_train.groupby('SKU')['Orders'].shift(7)
     df_train['lag_14'] = df_train.groupby('SKU')['Orders'].shift(14)
     
-    features = ['DayOfWeek', 'lag_7', 'lag_14', 'IsHoliday', 'Holiday_Eve', 'Is_Payday_Week', 'Temp_Max']
+    features = ['DayOfWeek', 'lag_7', 'lag_14', 'IsHoliday', 'Holiday_Eve', 'Holiday_Eve_2', 'Holiday_After', 'Is_Payday_Week', 'Temp_Max']
     model = XGBRegressor(n_estimators=200, learning_rate=0.05, max_depth=6)
     train_clean = df_train.dropna(subset=['lag_7', 'lag_14'])
     model.fit(train_clean[features], train_clean['Orders'])
     
-    # Predição D+1 em diante
+    # Predição D+1 a D+7
     future_range = pd.date_range(last_date + timedelta(days=1), last_date + timedelta(days=7))
     unique_skus = df[['SKU', 'Description', 'Group']].drop_duplicates()
     
@@ -92,132 +114,128 @@ def run_lean_forecast(df_v):
         temp = unique_skus.copy()
         temp['Date'] = d
         cal_dia = df_cal[df_cal['Date'] == d]
-        for f in ['IsHoliday', 'Holiday_Eve', 'Is_Payday_Week', 'Temp_Max']:
-            temp[f] = cal_dia[f].values[0] if not cal_dia.empty else 0
+        for f in features:
+            if f in cal_dia.columns: temp[f] = cal_dia[f].values[0]
         temp['DayOfWeek'] = d.dayofweek
         
-        # Buscar Lags Reais
+        # Lags reais
         l7 = df[df['Date'] == (d - timedelta(days=7))][['SKU', 'Orders']].rename(columns={'Orders': 'lag_7'})
         l14 = df[df['Date'] == (d - timedelta(days=14))][['SKU', 'Orders']].rename(columns={'Orders': 'lag_14'})
         temp = pd.merge(temp, l7, on='SKU', how='left')
         temp = pd.merge(temp, l14, on='SKU', how='left').fillna(0)
         
-        # Previsão Líquida (Sem Buffer)
         temp['Orders'] = np.maximum(0, np.round(model.predict(temp[features])))
+        # Domingos e Feriados não faturam
         if d.dayofweek == 6 or temp['IsHoliday'].iloc[0] == 1: temp['Orders'] = 0
         preds.append(temp)
         
     return pd.concat(preds), df_train
 
 # ==============================================================================
-# 3. INTERFACE E REGRAS PCP (FOCADO EM EFICIÊNCIA)
+# 4. INTERFACE E LOGICA DE COMPRAS (DÉFICIT LÍQUIDO)
 # ==============================================================================
 
-st.title("🌱 PCP Verdureira - Gestão de Perecíveis Just-in-Time")
+st.title("🌱 PCP Verdureira - Máquina de Inteligência v5.0")
 
-u1, u2 = st.columns(2)
-with u1:
+c1, c2 = st.columns(2)
+with c1:
     f_vendas = st.file_uploader("1. Vendas", type=['xlsx', 'csv'])
     f_ficha = st.file_uploader("2. Ficha Técnica", type=['xlsx', 'csv'])
-with u2:
+with c2:
     f_rend = st.file_uploader("3. Rendimento", type=['xlsx', 'csv'])
-    f_avail = st.file_uploader("4. Disponibilidade VP (Caixas)", type=['xlsx', 'csv'])
+    f_avail = st.file_uploader("4. Disponibilidade VP", type=['xlsx', 'csv'])
 
 if f_vendas and f_ficha and f_rend and f_avail:
-    # Cargas (Deduplicadas e Auditadas)
-    df_v = pd.read_excel(f_vendas) # Adicionar lógica de carga robusta aqui
-    df_r = pd.read_excel(f_ficha)
-    df_y = pd.read_excel(f_rend)
-    df_a = pd.read_excel(f_avail, header=2)
-
+    dv, dr, dy, da = load_and_standardize(f_vendas, f_ficha, f_rend, f_avail)
     scenario = st.radio("Cenário de Rendimento:", ["Reativo (1)", "Equilibrado (3)", "Conservador (5)"], index=1, horizontal=True)
     
     if st.button("🚀 Gerar Planejamento de Fábrica"):
-        # 1. PREVISÃO LÍQUIDA
-        forecast, df_hist_full = run_lean_forecast(df_v)
+        # 1. PREVISÃO LÍQUIDA (SEM BUFFER)
+        forecast, df_hist_full = run_pcp_forecast(dv)
         
-        # 2. MRP (Kg Necessários)
-        df_r['SKU'] = df_r['SKU'].astype(str).str.strip()
+        # 2. RESUMO EXECUTIVO (SEMANA COMERCIAL)
+        st.divider()
+        st.subheader("📊 Resumo Executivo (Comparativo Semana Comercial)")
+        f_start, f_end = forecast['Date'].min(), forecast['Date'].max()
+        ly_s, l2y_s = f_start - timedelta(days=364), f_start - timedelta(days=728)
+        
+        res = []
+        for g in ['Americana Bola', 'Vero', 'Saladas']:
+            v_curr = forecast[forecast['Group'] == g]['Orders'].sum()
+            v_ly = df_hist_full[(df_hist_full['Date'].between(ly_s, ly_s+timedelta(days=6))) & (df_hist_full['Group'] == g)]['Orders'].sum()
+            res.append({'Grupo': g, 'Prev 2026': int(v_curr), 'Real 2025': int(v_ly), 'Var %': f"{((v_curr/v_ly)-1)*100:+.1f}%" if v_ly > 0 else "0%"})
+        st.table(pd.DataFrame(res))
+
+        # 3. MRP E REGRAS MANDATÓRIAS
         forecast['SKU'] = forecast['SKU'].astype(str).str.strip()
-        mrp = pd.merge(forecast, df_r, on='SKU', how='inner')
+        mrp = pd.merge(forecast, dr, on='SKU', how='inner')
         mrp['Total_Kg'] = (mrp['Orders'] * pd.to_numeric(mrp['Weight_g'])) / 1000
 
-        # REGRA: Rigidez (Não substitui se ingrediente estiver no nome do SKU)
+        # RIGIDEZ: Nome do Ingrediente no Nome do Produto
         mrp['Is_Rigid'] = mrp.apply(lambda r: str(r['Ingredient']).lower() in str(r['Description']).lower(), axis=1)
         
-        # REGRA: Sábado antecipado para Sexta
+        # SÁBADO -> SEXTA
         mrp['Date_PCP'] = mrp['Date']
         mrp.loc[mrp['Date'].dt.dayofweek == 5, 'Date_PCP'] = mrp['Date'] - timedelta(days=1)
         
         need_daily = mrp.groupby(['Date_PCP', 'Ingredient', 'Is_Rigid'])['Total_Kg'].sum().unstack(fill_value=0).reset_index()
-        need_daily = need_daily.rename(columns={True: 'Demanda_Rigida', False: 'Demanda_Flexivel', 'Date_PCP': 'Date'})
-        
-        # 3. ABASTECIMENTO PRIORITÁRIO (Fazenda Própria)
+        need_daily = need_daily.rename(columns={True: 'Demand_Rigid', False: 'Demand_Flex', 'Date_PCP': 'Date'})
+
+        # 4. ABASTECIMENTO PRIORITÁRIO (VP)
         map_dias = {0:'Segunda', 1:'Terça', 2:'Quarta', 3:'Quinta', 4:'Sexta', 5:'Sábado', 6:'Domingo'}
         need_daily['DayName'] = need_daily['Date'].dt.dayofweek.map(map_dias)
         
-        # Rendimentos por cenário
-        df_y['Data'] = pd.to_datetime(df_y['Data'])
+        # Rendimentos (Cenários)
         yield_map = []
-        for (prod, forn), g in df_y.groupby(['Produto', 'Fornecedor']):
+        for (prod, forn), g in dy.groupby(['Produto', 'Fornecedor']):
             g = g.sort_values('Data', ascending=False)
             val = g['Rendimento'].iloc[0] if '1' in scenario else (g['Rendimento'].head(3).mean() if '3' in scenario else g['Rendimento'].head(5).mean())
             yield_map.append({'Produto': str(prod).lower().strip(), 'Origem': 'VP' if 'VERDE PRIMA' in str(forn).upper() else 'MKT', 'Y_Val': val})
         df_y_f = pd.DataFrame(yield_map)
 
         # Disponibilidade (Caixas -> Kg)
-        df_a['Ing_Key'] = df_a['Hortaliça'].str.lower().str.strip()
-        avail_melt = df_a.melt(id_vars='Ing_Key', var_name='DayName', value_name='Boxes_VP').fillna(0)
+        name_map = {'crespa verde': 'alface crespa', 'frizzy roxa': 'frisee roxa', 'lollo': 'lollo rossa', 'chicória': 'frisee chicória'}
+        da['Ing_Key'] = da['Hortaliça'].str.lower().str.strip().replace(name_map)
+        avail_melt = da.melt(id_vars='Ing_Key', var_name='DayName', value_name='Boxes_VP').fillna(0)
         y_vp = df_y_f[df_y_f['Origem'] == 'VP'].rename(columns={'Y_Val': 'Y_VP'})
         avail_kg = pd.merge(avail_melt, y_vp, left_on='Ing_Key', right_on='Produto', how='left')
         avail_kg['Kg_VP'] = pd.to_numeric(avail_kg['Boxes_VP'], errors='coerce').fillna(0) * avail_kg['Y_VP'].fillna(10.0)
 
-        # Merge Necessidade vs Fazenda
+        # MERGE FINAL E SUBSTITUIÇÕES
         df_proc = pd.merge(need_daily, avail_kg[['Ing_Key', 'DayName', 'Kg_VP']], left_on=['Ingredient', 'DayName'], right_on=['Ing_Key', 'DayName'], how='left').fillna(0)
         
-        # 4. SUBSTITUIÇÕES DE GRUPO (Minimizar perda no campo)
-        groups_sub = {
-            'Verdes': ['alface crespa', 'escarola', 'frisee chicória', 'lalique', 'romana'],
-            'Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa']
-        }
-
+        groups_sub = {'Verdes': ['alface crespa', 'escarola', 'frisee chicória', 'lalique', 'romana'], 'Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa']}
+        
         final_rows = []
         for date, g in df_proc.groupby('Date'):
-            # Consome o estoque da fazenda na demanda Rígida primeiro
-            g['Used_VP_Rigid'] = np.minimum(g['Kg_VP'], g.get('Demanda_Rigida', 0))
+            g['Used_VP_Rigid'] = np.minimum(g['Kg_VP'], g.get('Demand_Rigid', 0))
             g['Sobra_VP'] = g['Kg_VP'] - g['Used_VP_Rigid']
-            # O que sobrou atende a demanda Flexível do próprio item
-            g['Used_VP_Flex'] = np.minimum(g['Sobra_VP'], g.get('Demanda_Flexivel', 0))
+            g['Used_VP_Flex'] = np.minimum(g['Sobra_VP'], g.get('Demand_Flex', 0))
             g['Sobra_Item'] = g['Sobra_VP'] - g['Used_VP_Flex']
-            g['Deficit_Flex'] = g.get('Demanda_Flexivel', 0) - g['Used_VP_Flex']
+            g['Def_Flex'] = g.get('Demand_Flex', 0) - g['Used_VP_Flex']
             
-            # Substituição: Sobra de um atende falta de outro do mesmo grupo
+            # Substituição
             for g_name, members in groups_sub.items():
                 mask = g['Ingredient'].str.lower().str.strip().isin(members)
                 if mask.any():
-                    pool_sobra = g.loc[mask, 'Sobra_Item'].sum()
-                    pool_falta = g.loc[mask, 'Deficit_Flex'].sum()
-                    if pool_sobra > 0 and pool_falta > 0:
-                        compensa = min(pool_sobra, pool_falta)
-                        ratio = (pool_falta - compensa) / pool_falta if pool_falta > 0 else 0
-                        g.loc[mask, 'Deficit_Flex'] *= ratio
+                    sobra = g.loc[mask, 'Sobra_Item'].sum()
+                    falta = g.loc[mask, 'Def_Flex'].sum()
+                    if sobra > 0 and falta > 0:
+                        ratio = (falta - min(sobra, falta)) / falta if falta > 0 else 0
+                        g.loc[mask, 'Def_Flex'] *= ratio
             
-            # Déficit final que gera Ordem de Compra
-            g['Deficit_Líquido_Kg'] = (g.get('Demanda_Rigida', 0) - g['Used_VP_Rigid']) + g['Deficit_Flex']
+            g['Deficit_Líquido_Kg'] = (g.get('Demand_Rigid', 0) - g['Used_VP_Rigid']) + g['Def_Flex']
             final_rows.append(g)
 
         df_final = pd.concat(final_rows)
-        
-        # 5. ORDEM DE COMPRA (MERCADO - SEM BUFFER)
         y_mkt = df_y_f[df_y_f['Origem'] == 'MKT'].groupby('Produto')['Y_Val'].mean().reset_index().rename(columns={'Y_Val': 'Y_MKT'})
         df_final['Prod_Low'] = df_final['Ingredient'].str.lower().str.strip()
         df_final = pd.merge(df_final, y_mkt, left_on='Prod_Low', right_on='Produto', how='left')
         df_final['Boxes_Buy'] = np.ceil(df_final['Deficit_Líquido_Kg'] / df_final['Y_MKT'].fillna(10.0))
 
-        # VISUALIZAÇÃO
-        st.subheader(f"🛒 Ordem de Compra (Caixas Mercado - Sem Buffer de Segurança)")
-        # Horizonte Dinâmico: Apenas hoje em diante
-        today = pd.Timestamp.now().normalize()
-        pivot_buy = df_final[df_final['Date'] > today].pivot_table(index='Ingredient', columns='Date', values='Boxes_Buy', aggfunc='sum').fillna(0)
-        pivot_buy.columns = [f"{c.strftime('%d/%m')} ({map_dias[c.dayofweek]})" for c in pivot_buy.columns]
-        st.dataframe(pivot_buy[pivot_buy.sum(axis=1) > 0].style.format("{:.0f}"), use_container_width=True)
+        # VISUALIZAÇÃO D+1
+        st.divider()
+        st.subheader("🛒 Ordem de Compra de Mercado (D+1 em Diante)")
+        pivot = df_final[df_final['Date'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date', values='Boxes_Buy', aggfunc='sum').fillna(0)
+        pivot.columns = [f"{c.strftime('%d/%m')} ({map_dias[c.dayofweek]})" for c in pivot.columns]
+        st.dataframe(pivot[pivot.sum(axis=1) > 0].style.format("{:.0f}"), use_container_width=True)
