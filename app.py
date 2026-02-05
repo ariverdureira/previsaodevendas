@@ -10,7 +10,7 @@ import traceback
 from sklearn.metrics import mean_absolute_percentage_error
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PCP Verdureira - Industrial Intelligence v8.8", layout="wide")
+st.set_page_config(page_title="PCP Verdureira - Inteligência Industrial v8.9", layout="wide")
 
 # ==============================================================================
 # 1. MOTOR DE INTELIGÊNCIA (CLIMA COMPLETO, FERIADOS E PAGAMENTO)
@@ -56,7 +56,7 @@ def get_smart_calendar(start_date, end_date):
     return df_cal.fillna(0)
 
 # ==============================================================================
-# 2. CARGA E TRATAMENTO DE DADOS (DEDUPLICAÇÃO E PADRONIZAÇÃO)
+# 2. CARGA E TRATAMENTO DE DADOS (SEGURANÇA DE TIPOS E NOMES)
 # ==============================================================================
 
 def normalize_name(name):
@@ -107,12 +107,13 @@ def load_all_pcp_data(f_v, f_r, f_y, f_a):
             dr[col+'_Norm'] = dr[col].apply(normalize_name)
 
     dy = robust_load(f_y, "Rendimento")
-    dy['Data'] = pd.to_datetime(dy['Data'], errors='coerce')
+    # FIX: Renomeia 'Data' para 'Date' para evitar o crash de sort_values
+    dy = dy.rename(columns={'Data': 'Date'})
+    dy['Date'] = pd.to_datetime(dy['Date'], errors='coerce')
     dy['Produto_Norm'] = dy['Produto'].apply(normalize_name)
 
     da = robust_load(f_a, "Disponibilidade", is_avail=True)
     if 'Hortaliça' in da.columns:
-        da = da.dropna(subset=['Hortaliça'])
         da['Hort_Norm'] = da['Hortaliça'].apply(normalize_name)
     
     return dv, dr, dy, da
@@ -169,10 +170,10 @@ def run_ml_forecast(dv):
     return pd.concat(preds_fut), df_train, df_cal[df_cal['Date'] > last_date]
 
 # ==============================================================================
-# 4. INTERFACE E LÓGICA DE ABASTECIMENTO (v8.8)
+# 4. INTERFACE E LÓGICA DE ABASTECIMENTO (v8.9)
 # ==============================================================================
 
-st.title("🛡️ PCP Verdureira - Inteligência Industrial v8.8")
+st.title("🌱 Verdureira Agroindústria - Inteligência PCP v8.9")
 
 u1, u2 = st.columns(2)
 with u1:
@@ -184,11 +185,11 @@ with u2:
 
 if f_vendas and f_ficha and f_rend and f_avail:
     dv, dr, dy, da = load_all_pcp_data(f_vendas, f_ficha, f_rend, f_avail)
-    scenario_name = st.radio("Cenário Rendimento:", ["Reativo (1)", "Equilibrado (3)", "Conservador (5)"], index=1, horizontal=True)
+    scenario_name = st.radio("Cenário de Rendimento:", ["Reativo (1)", "Equilibrado (3)", "Conservador (5)"], index=1, horizontal=True)
     
     if st.button("🚀 Gerar Planejamento Completo"):
         try:
-            with st.spinner("IA Processando lotes e calculando déficit..."):
+            with st.spinner("IA Processando dados, lotes de 48h e clima..."):
                 forecast, df_hist, weather_fut = run_ml_forecast(dv)
                 
                 # --- 1. CLIMA ---
@@ -199,7 +200,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 st.dataframe(w_disp.set_index('Date').T, use_container_width=True)
                 
                 # --- 2. RESUMO EXECUTIVO ---
-                st.subheader("📊 Resumo Executivo Trienal (Comparativo Semanal)")
+                st.subheader("📊 Resumo Executivo Trienal (Semana Comercial)")
                 f_s = forecast['Date'].min()
                 ly_s, l2y_s = f_s - timedelta(days=364), f_s - timedelta(days=728)
                 res_list = []
@@ -214,36 +215,37 @@ if f_vendas and f_ficha and f_rend and f_avail:
                         'Var % (vs 24)': f"{((v_curr/v_l2y)-1)*100:+.1f}%" if v_l2y > 0 else "0%"
                     })
                 df_exec = pd.DataFrame(res_list)
-                t_curr, t_ly, t_l2y = df_exec['IA 2026'].sum(), df_exec['Real 2025'].sum(), df_exec['Real 2024'].sum()
-                total_row = pd.DataFrame([{'Grupo': 'TOTAL GERAL', 'IA 2026': int(t_curr), 'Real 2025': int(t_ly), 'Real 2024': int(t_l2y)}])
+                total_row = pd.DataFrame([{'Grupo': 'TOTAL GERAL', 'IA 2026': int(df_exec['IA 2026'].sum()), 'Real 2025': int(df_exec['Real 2025'].sum()), 'Real 2024': int(df_exec['Real 2024'].sum())}])
                 st.table(pd.concat([df_exec, total_row], ignore_index=True))
 
-                # --- 3. PREVISÃO SKU ---
-                st.subheader("🗓️ Previsão SKU/Dia (Unidades)")
+                # --- 3. PREVISÃO SKU (FIX ARROW) ---
+                st.subheader("🗓️ Previsão Detalhada SKU/Dia (Unidades)")
                 pivot_fore = forecast.pivot_table(index=['SKU', 'Description'], columns='Date', values='Orders', aggfunc='sum').fillna(0)
                 map_dias = {0:'Seg', 1:'Ter', 2:'Qua', 3:'Qui', 4:'Sex', 5:'Sáb', 6:'Dom'}
                 pivot_fore.columns = [f"{c.strftime('%d/%m')} ({map_dias[c.dayofweek]})" for c in pivot_fore.columns]
                 
-                # Exibição segura para PyArrow
-                st.dataframe(pivot_fore.round(0).reset_index(), use_container_width=True, hide_index=True)
+                # FIX: SKU e Description resetados para string pura para não quebrar visualização
+                pivot_display = pivot_fore.round(0).reset_index()
+                pivot_display['SKU'] = pivot_display['SKU'].astype(str)
+                pivot_display['Description'] = pivot_display['Description'].astype(str)
+                st.dataframe(pivot_display, use_container_width=True, hide_index=True)
                 st.download_button("📥 Baixar Previsão CSV", pivot_fore.to_csv().encode('utf-8'), "previsao.csv", "text/csv")
 
-                # --- 4. CASCATA PCP E ROLAGEM ---
+                # --- 4. CASCATA PCP E ROLAGEM 48H ---
                 mrp = pd.merge(forecast, dr, on='SKU', how='inner')
                 mrp['Total_Kg'] = (mrp['Orders'] * pd.to_numeric(mrp['Comp_mg'], errors='coerce')) / 1000
                 mrp['Is_Rigid'] = mrp.apply(lambda r: normalize_name(r['Ingredient']) in normalize_name(r['Description']), axis=1)
-                
                 mrp['Date_Calc'] = mrp['Date']
                 mrp.loc[mrp['Date'].dt.dayofweek == 5, 'Date_Calc'] = mrp['Date'] - timedelta(days=1)
                 
-                # PADRONIZAÇÃO DE CHAVE: Todo o MRP agora usa Produto_Norm para casar com Rendimento
                 need_daily = mrp.groupby(['Date_Calc', 'Ingredient_Norm', 'Is_Rigid', 'A_Norm', 'B_Norm', 'C_Norm', 'Ingredient'])['Total_Kg'].sum().reset_index()
+                # Chave Produto_Norm para casar com rendimento
                 need_daily = need_daily.rename(columns={'Ingredient_Norm': 'Produto_Norm'})
 
                 da_clean = da.groupby('Hort_Norm')[['Segunda','Terça','Quarta','Quinta','Sexta']].sum().reset_index()
                 y_map = []
                 for (prod, forn), g in dy.groupby(['Produto_Norm', 'Fornecedor']):
-                    g = g.sort_values('Date', ascending=False)
+                    g = g.sort_values('Date', ascending=False) # Agora 'Date' existe!
                     val = g['Rendimento'].iloc[0] if "1" in scenario_name else (g['Rendimento'].head(3).mean() if "3" in scenario_name else g['Rendimento'].head(5).mean())
                     y_map.append({'Produto_Norm': prod, 'Origem': 'VP' if 'VERDE' in str(forn).upper() else 'MKT', 'Y_Val': val})
                 df_y_f = pd.DataFrame(y_map)
@@ -266,9 +268,9 @@ if f_vendas and f_ficha and f_rend and f_avail:
                     if day_name in ['Sábado', 'Domingo']:
                         pool_estoque = {}
                     else:
-                        col_name = day_name if day_name in da_clean.columns else 'Sexta'
+                        target_col = day_name if day_name in da_clean.columns else 'Sexta'
                         y_vp = df_y_f[df_y_f['Origem'] == 'VP'].rename(columns={'Y_Val': 'Y_VP'})
-                        col_raw = da_clean[['Hort_Norm', col_name]].copy().rename(columns={col_name: 'Boxes', 'Hort_Norm': 'Produto_Norm'})
+                        col_raw = da_clean[['Hort_Norm', target_col]].copy().rename(columns={target_col: 'Boxes', 'Hort_Norm': 'Produto_Norm'})
                         col_kg = pd.merge(col_raw, y_vp, on='Produto_Norm', how='left')
                         col_kg['Kg'] = col_kg['Boxes'] * col_kg['Y_VP'].fillna(10.0)
                         for _, rc in col_kg.iterrows():
@@ -310,7 +312,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
                                     if draw_g > 0:
                                         sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': m, 'Kg': round(draw_g, 1), 'Origem': 'Grupo '+g_name})
                                         needed -= draw_g
-                            g_date.at[idx, 'Def_Final'] = max(0, int(needed))
+                            g_date.at[idx, 'Def_Final'] = max(0, needed)
                     
                     g_date['Def_Final'] = g_date['Def_Final'].fillna(g_date['Def_Pos_Rec'])
                     g_date['Sobra_Fazenda'] = g_date['Produto_Norm'].apply(lambda x: sum([l['qty'] for l in pool_estoque.get(x, [])]))
@@ -318,12 +320,10 @@ if f_vendas and f_ficha and f_rend and f_avail:
 
                 df_final = pd.concat(final_rows)
                 y_mkt = df_y_f[df_y_f['Origem'] == 'MKT'].groupby('Produto_Norm')['Y_Val'].mean().reset_index().rename(columns={'Y_Val': 'Y_MKT'})
-                
-                # FIX DO KEYERROR: Produto_Norm está garantido agora
                 df_final = pd.merge(df_final, y_mkt, on='Produto_Norm', how='left')
                 df_final['Boxes_Buy'] = np.ceil(df_final['Def_Final'] / df_final['Y_MKT'].fillna(10.0))
 
-                # --- 5. RESULTADOS FINAIS ---
+                # --- 5. RESULTADOS ---
                 st.divider()
                 st.subheader("🛒 Ordem de Compra de Mercado (Caixas - D+1)")
                 pivot_buy = df_final[df_final['Date_Calc'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date_Calc', values='Boxes_Buy', aggfunc='sum').fillna(0)
