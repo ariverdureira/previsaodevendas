@@ -264,6 +264,94 @@ def generate_features(df):
     d['roll_7'] = d.groupby('SKU')['Orders'].shift(1).rolling(7).mean()
     return d
 
+def calculate_backtest_accuracy(df_raw):
+    """Calcula a acurácia do modelo nos últimos 7 dias de dados reais"""
+    try:
+        df_clean = filter_history_vero(df_raw)
+        df_clean = clean_outliers(df_clean)
+        
+        last_date = df_clean['Date'].max()
+        start_test = last_date - timedelta(days=6) # 7 dias (inc. hoje)
+        
+        # Split Treino/Teste
+        train = df_clean[df_clean['Date'] < start_test]
+        test = df_clean[df_clean['Date'] >= start_test]
+        
+        if train.empty or test.empty:
+            return None, None, None
+
+        # Prepara dados (Features)
+        # Para backtest, precisamos gerar features considerando o passado como "futuro"
+        # Simplificação: Usamos generate_features no dataset completo e filtramos
+        
+        # Gerar features no dataset completo (com lacunas preenchidas se necessário, mas aqui assumimos continuidade)
+        # Para garantir lags corretos, pegamos um pedaço do treino + teste
+        # Idealmente, o teste deveria ser previsto sem ver o target. 
+        # Como usamos lags, o lag_1 do dia D depende do dia D-1. 
+        # Em previsão recursiva, usamos a previsão. Aqui para simplificar e ser rápido (índice),
+        # usaremos One-Step Ahead (usa dado real anterior) ou previsão direta se lags permitirem.
+        # Vamos fazer previsão direta simples usando o modelo treinado.
+        
+        # Treino
+        unique_skus = df_clean[['SKU', 'Description', 'Group']].drop_duplicates()
+        unique_skus['key'] = 1
+        
+        date_range_full = pd.date_range(train['Date'].min(), last_date)
+        df_dates_full = pd.DataFrame({'Date': date_range_full})
+        df_dates_full['key'] = 1
+        
+        df_master = pd.merge(df_dates_full, unique_skus, on='key').drop('key', axis=1)
+        df_master = pd.merge(df_master, df_clean[['Date','SKU','Orders']], on=['Date','SKU'], how='left').fillna(0)
+        
+        # Features
+        holidays_df = get_holidays_calendar(df_master['Date'].min(), df_master['Date'].max())
+        df_master = pd.merge(df_master, holidays_df, on='Date', how='left')
+        df_master['IsHoliday'] = df_master['IsHoliday'].fillna(0)
+        df_master['IsHighImpact'] = df_master['IsHighImpact'].fillna(0)
+        df_master['IsHighImpactNextDay'] = df_master['IsHighImpact'].shift(-1).fillna(0)
+        
+        # Clima Histórico (Simplificado: Pega do get_weather se possível ou gera aleatório consistente)
+        weather = get_weather_data(df_master['Date'].min(), df_master['Date'].max())
+        if weather is not None:
+             df_master = pd.merge(df_master, weather, on='Date', how='left')
+        else:
+             df_master['Temp_Avg'] = 25
+             df_master['Rain_mm'] = 5
+             
+        df_master['Temp_Avg'] = df_master['Temp_Avg'].fillna(25)
+        df_master['Rain_mm'] = df_master['Rain_mm'].fillna(0)
+
+        df_feat = generate_features(df_master)
+        features = ['DayOfWeek', 'IsWeekend', 'IsHoliday', 'IsHighImpact', 'IsHighImpactNextDay', 'DayOfMonth', 'IsPaydayWeek', 'Temp_Avg', 'Rain_mm', 'lag_1', 'lag_7', 'roll_7']
+        
+        X_train = df_feat[df_feat['Date'] < start_test].dropna()
+        X_test = df_feat[df_feat['Date'] >= start_test].dropna() # Aqui usamos dados reais passados para lag, é um "Forecast com dados reais de entrada" (ex-post)
+        
+        if X_train.empty or X_test.empty: return None, None, None
+        
+        # Modelo Rápido
+        model = XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, n_jobs=-1, random_state=42)
+        model.fit(X_train[features], X_train['Orders'])
+        
+        preds = model.predict(X_test[features])
+        preds = np.maximum(np.round(preds, 0), 0)
+        
+        # Métricas
+        actuals = X_test['Orders'].values
+        
+        # WAPE (Weighted Absolute Percentage Error) - Melhor que MAPE para vendas com zeros ou volumes baixos
+        sum_abs_error = np.sum(np.abs(actuals - preds))
+        sum_actuals = np.sum(actuals)
+        
+        wape = sum_abs_error / sum_actuals if sum_actuals > 0 else 0
+        accuracy = max(0, 1 - wape)
+        
+        return accuracy, sum_actuals, np.sum(preds)
+        
+    except Exception as e:
+        print(f"Erro Backtest: {e}")
+        return None, None, None
+
 def run_forecast(df_raw, days_ahead=7):
     df_train_base = filter_history_vero(df_raw)
     df_train_base = clean_outliers(df_train_base)
@@ -411,6 +499,11 @@ if uploaded_file:
             processar = st.button("🚀 Gerar Planejamento Completo", use_container_width=True)
 
         if processar:
+            # --- 0. BACKTEST DE ACURÁCIA (NOVO) ---
+            with st.spinner("Calculando precisão do modelo (Backtest 7 dias)..."):
+                acc, real_vol, pred_vol = calculate_backtest_accuracy(df_raw)
+                st.session_state['accuracy_metric'] = (acc, real_vol, pred_vol)
+
             with st.spinner("Otimizando modelo (Auto-ML) e Analisando Dados..."):
                 try:
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=7)
@@ -437,8 +530,18 @@ if uploaded_file:
                 w_disp['Chuva (mm)'] = w_disp['Chuva (mm)'].map('{:.1f}'.format)
                 st.dataframe(w_disp, hide_index=True, use_container_width=True)
             
-            # --- 2. RESUMO EXECUTIVO ---
+            # --- 2. INDICADOR DE ACURÁCIA (NOVO) ---
             st.divider()
+            acc_data = st.session_state.get('accuracy_metric', (None, None, None))
+            if acc_data[0] is not None:
+                acuracia, vol_real, vol_prev = acc_data
+                
+                kpi1, kpi2, kpi3 = st.columns(3)
+                kpi1.metric("Acuracidade Global (7d)", f"{acuracia*100:.1f}%", help="Baseado no WAPE dos últimos 7 dias")
+                kpi2.metric("Volume Real (7d)", f"{vol_real:,.0f} un")
+                kpi3.metric("Volume Previsto (Backtest)", f"{vol_prev:,.0f} un", delta=f"{(vol_prev-vol_real):,.0f} un")
+            
+            # --- 3. RESUMO EXECUTIVO ---
             st.subheader("📊 Resumo Executivo")
             
             f_start = max_date + timedelta(days=1)
@@ -494,7 +597,7 @@ if uploaded_file:
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
             st.caption(f"ℹ️ As datas de comparação seguem a lógica de 'Semana Comercial' (Alinhamento por Dia da Semana) e não data exata de calendário.")
             
-            # --- 3. PREVISÃO DETALHADA ---
+            # --- 4. PREVISÃO DETALHADA ---
             st.divider()
             st.write("### 🗓️ Previsão Detalhada (Vendas)")
             df_piv = forecast.pivot_table(index=['SKU', 'Description', 'Group'], columns='Date', values='Orders', aggfunc='sum').reset_index()
@@ -507,7 +610,7 @@ if uploaded_file:
             csv_sales = df_piv.to_csv(index=False).encode('utf-8')
             st.download_button("📥 1. Baixar Previsão de Vendas (CSV)", csv_sales, "previsao_vendas.csv", "text/csv")
 
-            # --- 4. FÁBRICA & COMPRAS (OTIMIZADO) ---
+            # --- 5. FÁBRICA & COMPRAS (OTIMIZADO) ---
             if uploaded_recipe:
                 st.divider()
                 st.subheader("🏭 Planejamento de Compras")
@@ -587,7 +690,7 @@ if uploaded_file:
                             df_proc = pd.merge(df_kg_daily, df_avail_melt, left_on=['Ingredient_Lower', 'DayName'], right_on=['Hortaliça_Lower', 'DayName'], how='left')
                             df_proc['Kg_Available'] = df_proc['Kg_Available'].fillna(0)
                             
-                            # FILTRO DATA DINÂMICO (NOVO) - Ignora passado
+                            # FILTRO DATA DINÂMICO (Ignora passado)
                             today = pd.Timestamp.now().normalize()
                             df_proc = df_proc[df_proc['Date'] > today]
                             
@@ -685,20 +788,17 @@ if uploaded_file:
                                     num_yield = audit_yield.select_dtypes(include=[np.number]).columns
                                     st.dataframe(audit_yield.style.format("{:.2f}", subset=num_yield))
 
-                                # SOBRAS DIÁRIAS (NOVO FORMATO)
+                                # SOBRAS DIÁRIAS
                                 df_surplus_daily = df_calc[df_calc['Sobra_VP'] > 0]
                                 if not df_surplus_daily.empty:
                                     with st.expander(f"🚜 Sobras Verde Prima (Visão Diária)", expanded=False):
                                         df_surplus_view = df_surplus_daily.pivot_table(index='Ingredient', columns='Date', values='Sobra_VP', aggfunc='sum').fillna(0)
-                                        # Formata colunas data
                                         cols_s_fmt = []
                                         for c in df_surplus_view.columns:
                                             d_str = c.strftime('%d/%m (%a)')
                                             d_str = d_str.replace('Mon', 'Seg').replace('Tue', 'Ter').replace('Wed', 'Qua').replace('Thu', 'Qui').replace('Fri', 'Sex')
                                             cols_s_fmt.append(d_str)
                                         df_surplus_view.columns = cols_s_fmt
-                                        
-                                        # Aplica formatação segura
                                         st.dataframe(df_surplus_view.style.format("{:.1f}"), use_container_width=True)
 
                                 csv_order = df_daily_view.to_csv().encode('utf-8')
@@ -713,7 +813,7 @@ if uploaded_file:
                         df_kg_show = df_kg_daily.pivot_table(index='Ingredient', columns='Date', values='Total_Kg', aggfunc='sum').fillna(0)
                         st.dataframe(df_kg_show.style.format("{:.1f}"), use_container_width=True)
 
-            # --- 5. IA ---
+            # --- 6. IA ---
             st.divider()
             st.subheader("🤖 Analista IA")
             api_key = st.text_input("Insira sua Gemini API Key:", type="password")
