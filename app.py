@@ -10,7 +10,7 @@ import traceback
 from sklearn.metrics import mean_absolute_percentage_error
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PCP Verdureira - Inteligência Industrial v8.6", layout="wide")
+st.set_page_config(page_title="PCP Verdureira - Industrial Intelligence v8.7", layout="wide")
 
 # ==============================================================================
 # 1. MOTOR DE INTELIGÊNCIA (CLIMA COMPLETO, FERIADOS E PAGAMENTO)
@@ -56,7 +56,7 @@ def get_smart_calendar(start_date, end_date):
     return df_cal.fillna(0)
 
 # ==============================================================================
-# 2. CARGA E TRATAMENTO DE DADOS (BLINDAGEM DE TIPOS E CABEÇALHOS)
+# 2. CARGA E BLINDAGEM DE DADOS (DEDUPLICAÇÃO E TRATAMENTO DE TIPOS)
 # ==============================================================================
 
 def normalize_name(name):
@@ -82,8 +82,9 @@ def robust_load(file, name, is_avail=False):
     df = df.loc[:, ~df.columns.duplicated()].copy()
     df.columns = [str(c).strip() for c in df.columns]
     
-    for col in ['SKU', 'Cod', 'Código', 'Cod- SKU', 'Description', 'Descrição', 'Descrição do código']:
-        if col in df.columns:
+    # BLINDAGEM INICIAL DE TIPOS
+    for col in df.columns:
+        if any(x in col for x in ['SKU', 'Cod', 'Código', 'Description', 'Descrição', 'Hortaliça', 'Ingredient', 'Materia Prima']):
             df[col] = df[col].astype(str).str.strip()
     return df
 
@@ -167,10 +168,10 @@ def run_ml_forecast(dv):
     return pd.concat(preds_fut), df_train, df_cal[df_cal['Date'] > last_date]
 
 # ==============================================================================
-# 4. INTERFACE E LÓGICA PCP (v8.6)
+# 4. INTERFACE E LÓGICA PCP (v8.7)
 # ==============================================================================
 
-st.title("🌱 Verdureira Agroindústria - Inteligência PCP v8.6")
+st.title("🌱 Verdureira Agroindústria - Inteligência PCP v8.7")
 
 u1, u2 = st.columns(2)
 with u1:
@@ -184,7 +185,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
     dv, dr, dy, da = load_all_pcp_data(f_vendas, f_ficha, f_rend, f_avail)
     
     if 'Hortaliça' not in da.columns:
-        st.error("❌ Erro na planilha de disponibilidade: coluna 'Hortaliça' não detectada.")
+        st.error("❌ Coluna 'Hortaliça' não encontrada.")
     else:
         scenario_name = st.radio("Cenário Rendimento:", ["Reativo (1)", "Equilibrado (3)", "Conservador (5)"], index=1, horizontal=True)
         
@@ -216,19 +217,23 @@ if f_vendas and f_ficha and f_rend and f_avail:
                             'Var % (vs 24)': f"{((v_curr/v_l2y)-1)*100:+.1f}%" if v_l2y > 0 else "0%"
                         })
                     df_exec = pd.DataFrame(res_list)
-                    t_curr, t_ly, t_l2y = df_exec['IA 2026'].sum(), df_exec['Real 2025'].sum(), df_exec['Real 2024'].sum()
-                    total_row = pd.DataFrame([{'Grupo': 'TOTAL GERAL', 'IA 2026': int(t_curr), 'Real 2025': int(t_ly), 'Real 2024': int(t_l2y)}])
+                    total_row = pd.DataFrame([{'Grupo': 'TOTAL GERAL', 'IA 2026': int(df_exec['IA 2026'].sum()), 'Real 2025': int(df_exec['Real 2025'].sum()), 'Real 2024': int(df_exec['Real 2024'].sum())}])
                     st.table(pd.concat([df_exec, total_row], ignore_index=True))
 
-                    # 3. PREVISÃO SKU
-                    st.subheader("🗓️ Previsão SKU/Dia (Unidades)")
+                    # 3. PREVISÃO SKU (SOLUÇÃO PARA ARROW ERROR)
+                    st.subheader("🗓️ Previsão Detalhada SKU/Dia (Unidades)")
                     pivot_fore = forecast.pivot_table(index=['SKU', 'Description'], columns='Date', values='Orders', aggfunc='sum').fillna(0)
                     map_dias = {0:'Seg', 1:'Ter', 2:'Qua', 3:'Qui', 4:'Sex', 5:'Sáb', 6:'Dom'}
                     pivot_fore.columns = [f"{c.strftime('%d/%m')} ({map_dias[c.dayofweek]})" for c in pivot_fore.columns]
-                    st.dataframe(pivot_fore.round(0), use_container_width=True)
+                    
+                    # FIX: Resetar o index e garantir que SKU e Description sejam Strings puras antes da exibição
+                    pivot_display = pivot_fore.round(0).reset_index()
+                    pivot_display['SKU'] = pivot_display['SKU'].astype(str)
+                    pivot_display['Description'] = pivot_display['Description'].astype(str)
+                    st.dataframe(pivot_display, use_container_width=True, hide_index=True)
                     st.download_button("📥 Baixar Previsão CSV", pivot_fore.to_csv().encode('utf-8'), "previsao.csv", "text/csv")
 
-                    # 4. CASCATA PCP
+                    # 4. CASCATA PCP E ROLAGEM
                     mrp = pd.merge(forecast, dr, on='SKU', how='inner')
                     mrp['Total_Kg'] = (mrp['Orders'] * pd.to_numeric(mrp['Comp_mg'], errors='coerce')) / 1000
                     mrp['Is_Rigid'] = mrp.apply(lambda r: normalize_name(r['Ingredient']) in normalize_name(r['Description']), axis=1)
@@ -322,19 +327,22 @@ if f_vendas and f_ficha and f_rend and f_avail:
                     st.subheader("🛒 Ordem de Compra de Mercado (Caixas - D+1)")
                     pivot_buy = df_final[df_final['Date_Calc'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date_Calc', values='Boxes_Buy', aggfunc='sum').fillna(0)
                     pivot_buy.columns = [f"{c.strftime('%d/%m')} ({map_ext[c.dayofweek][:3]})" for c in pivot_buy.columns]
-                    st.dataframe(pivot_buy.astype(int), use_container_width=True)
+                    
+                    # Exibição segura de Compras
+                    pivot_buy_display = pivot_buy.astype(int).reset_index()
+                    st.dataframe(pivot_buy_display, use_container_width=True, hide_index=True)
                     st.download_button("📥 Baixar Compras CSV", pivot_buy.to_csv().encode('utf-8'), "ordem_compra.csv", "text/csv")
 
-                    c_a, c_b = st.columns(2)
-                    with c_a:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
                         st.subheader("🚜 Sobras Reais na Fazenda (Kg)")
                         pivot_sobra = df_final[df_final['Date_Calc'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date_Calc', values='Sobra_Fazenda', aggfunc='sum').fillna(0)
-                        st.dataframe(pivot_sobra[pivot_sobra.sum(axis=1) > 0.1].style.format("{:.1f}"), use_container_width=True)
-                    with c_b:
+                        st.dataframe(pivot_sobra[pivot_sobra.sum(axis=1) > 0.1].round(1), use_container_width=True)
+                    with col_b:
                         st.subheader("📋 Relatórios de Auditoria")
                         if rollover_log: st.download_button("📥 Baixar Relatório de Rolagem", pd.DataFrame(rollover_log).to_csv().encode('utf-8'), "rolagem.csv", "text/csv")
                         if sub_log: st.download_button("📥 Baixar Log de Substituições", pd.DataFrame(sub_log).to_csv().encode('utf-8'), "subst.csv", "text/csv")
 
             except Exception as e:
-                st.error(f"Erro no processamento: {e}")
+                st.error(f"Erro: {e}")
                 st.code(traceback.format_exc())
