@@ -7,8 +7,7 @@ import requests
 import holidays
 import traceback
 import re
-from google import genai
-from sklearn.metrics import mean_absolute_error
+import unicodedata # Biblioteca nativa para lidar com acentos
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="PCP Verdureira", layout="wide")
@@ -16,6 +15,14 @@ st.set_page_config(page_title="PCP Verdureira", layout="wide")
 # ==============================================================================
 # 1. FUNÇÕES AUXILIARES E CARGAS
 # ==============================================================================
+
+def normalize_text(text):
+    """Remove acentos e espaços, e coloca em minúsculo para garantir o match"""
+    if not isinstance(text, str):
+        return str(text)
+    # Normaliza unicode (ex: ç -> c, á -> a)
+    text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII')
+    return text.lower().strip()
 
 def get_holidays_calendar(start_date, end_date):
     try:
@@ -91,7 +98,7 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
 
 def classify_group(desc):
     if not isinstance(desc, str): return 'Outros'
-    txt = desc.lower()
+    txt = normalize_text(desc) # Normaliza aqui também
     if 'americana bola' in txt: return 'Americana Bola'
     vero_keys = ['vero', 'primavera', 'roxa', 'mix', 'repolho', 'couve', 'rucula hg']
     if any(x in txt for x in vero_keys): return 'Vero'
@@ -163,7 +170,10 @@ def load_yield_data_scenarios(uploaded_file):
         df.columns = df.columns.str.strip()
         df = df[pd.to_numeric(df['Rendimento'], errors='coerce') > 0]
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
-        df['Produto'] = df['Produto'].astype(str).str.strip().str.lower()
+        
+        # Normalização rigorosa
+        df['Produto'] = df['Produto'].apply(normalize_text)
+        
         df['Fornecedor'] = df['Fornecedor'].astype(str).str.strip().str.upper()
         df['Origem'] = np.where(df['Fornecedor'] == 'VERDE PRIMA', 'VP', 'MERCADO')
         
@@ -191,7 +201,6 @@ def load_yield_data_scenarios(uploaded_file):
 @st.cache_data
 def load_availability_data(uploaded_file):
     try:
-        # AJUSTE PARA ARQUIVO SIMPLIFICADO: HEADER=1 (Linha 2 do Excel)
         try: df = pd.read_csv(uploaded_file, header=1)
         except: df = pd.read_excel(uploaded_file, header=1)
         df.columns = df.columns.str.strip()
@@ -200,25 +209,25 @@ def load_availability_data(uploaded_file):
             'crespa verde': 'alface crespa',
             'frizzy roxa': 'frisee roxa',
             'lollo': 'lollo rossa',
-            'chicória': 'frisee chicória',
+            'chicoria': 'frisee chicoria', # Sem acento na chave por causa do normalize
         }
         
         if 'Hortaliça' in df.columns:
             df = df.dropna(subset=['Hortaliça'])
-            df['Hortaliça'] = df['Hortaliça'].astype(str).str.strip()
+            
+            # Normalização rigorosa
+            df['Hortaliça_Norm'] = df['Hortaliça'].apply(normalize_text)
             
             def translate_name(name):
-                n_lower = name.lower()
-                return name_map.get(n_lower, name) 
+                # O nome já entra normalizado (sem acento, minúsculo)
+                return name_map.get(name, name) 
             
-            df['Hortaliça_Traduzida'] = df['Hortaliça'].apply(translate_name)
+            df['Hortaliça_Traduzida'] = df['Hortaliça_Norm'].apply(translate_name)
             
             cols_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta']
-            # Filtra colunas que realmente existem (para evitar erro se sobrar espaço vazio)
             cols_existentes = [c for c in cols_dias if c in df.columns]
             
             if not cols_existentes:
-                # Tenta achar colunas com espaço extra "Segunda "
                 for c in df.columns:
                     if c.strip() in cols_dias:
                         df.rename(columns={c: c.strip()}, inplace=True)
@@ -274,20 +283,17 @@ def generate_features(df):
     return d
 
 def calculate_backtest_accuracy(df_raw):
-    """Calcula a acurácia do modelo nos últimos 7 dias de dados reais"""
     try:
         df_clean = filter_history_vero(df_raw)
         df_clean = clean_outliers(df_clean)
         
         last_date = df_clean['Date'].max()
-        start_test = last_date - timedelta(days=6) # 7 dias (inc. hoje)
+        start_test = last_date - timedelta(days=6)
         
-        # Split Treino/Teste
         train = df_clean[df_clean['Date'] < start_test]
         test = df_clean[df_clean['Date'] >= start_test]
         
-        if train.empty or test.empty:
-            return None, None, None
+        if train.empty or test.empty: return None, None, None
 
         unique_skus = df_clean[['SKU', 'Description', 'Group']].drop_duplicates()
         unique_skus['key'] = 1
@@ -625,8 +631,8 @@ if uploaded_file:
                     df_mrp['Total_Kg'] = (df_mrp['Orders'] * df_mrp['Weight_g']) / 1000
                     
                     def check_rigid(row):
-                        ing = str(row['Ingredient']).lower()
-                        desc = str(row['Description']).lower()
+                        ing = normalize_text(str(row['Ingredient']))
+                        desc = normalize_text(str(row['Description']))
                         return ing in desc
 
                     df_mrp['Is_Rigid'] = df_mrp.apply(check_rigid, axis=1)
@@ -636,7 +642,9 @@ if uploaded_file:
                     mask_sat = df_mrp['DayNum'] == 5
                     df_mrp.loc[mask_sat, 'Date'] = df_mrp.loc[mask_sat, 'Date'] - timedelta(days=1)
                     
-                    df_kg_daily = df_mrp.groupby(['Ingredient', 'Date', 'Is_Rigid'])['Total_Kg'].sum().unstack(fill_value=0).reset_index()
+                    df_mrp['Ingredient_Norm'] = df_mrp['Ingredient'].apply(normalize_text) # Normaliza aqui tb
+                    
+                    df_kg_daily = df_mrp.groupby(['Ingredient_Norm', 'Ingredient', 'Date', 'Is_Rigid'])['Total_Kg'].sum().unstack(fill_value=0).reset_index()
                     if True not in df_kg_daily.columns: df_kg_daily[True] = 0
                     if False not in df_kg_daily.columns: df_kg_daily[False] = 0
                     
@@ -659,21 +667,21 @@ if uploaded_file:
                             map_dias = {0: 'Segunda', 1: 'Terça', 2: 'Quarta', 3: 'Quinta', 4: 'Sexta', 5: 'Sábado', 6: 'Domingo'}
                             df_kg_daily['DayNum'] = df_kg_daily['Date'].dt.dayofweek
                             df_kg_daily['DayName'] = df_kg_daily['DayNum'].map(map_dias)
-                            df_kg_daily['Ingredient_Lower'] = df_kg_daily['Ingredient'].astype(str).str.strip().str.lower()
-                            df_avail['Hortaliça_Lower'] = df_avail['Hortaliça_Traduzida'].astype(str).str.strip().str.lower()
+                            # Já está normalizado em Ingredient_Norm
                             
-                            id_vars = ['Hortaliça_Traduzida', 'Hortaliça_Lower']
+                            id_vars = ['Hortaliça_Traduzida']
                             val_vars = [c for c in df_avail.columns if c in map_dias.values()]
                             df_avail_melt = df_avail.melt(id_vars=id_vars, value_vars=val_vars, var_name='DayName', value_name='Kg_Available')
                             
-                            df_proc = pd.merge(df_kg_daily, df_avail_melt, left_on=['Ingredient_Lower', 'DayName'], right_on=['Hortaliça_Lower', 'DayName'], how='left')
+                            # Merge usando chave normalizada
+                            df_proc = pd.merge(df_kg_daily, df_avail_melt, left_on=['Ingredient_Norm', 'DayName'], right_on=['Hortaliça_Traduzida', 'DayName'], how='left')
                             df_proc['Kg_Available'] = df_proc['Kg_Available'].fillna(0)
                             
                             today = pd.Timestamp.now().normalize()
                             df_proc = df_proc[df_proc['Date'] > today]
                             
                             groups_sub = {
-                                'Frutas Verdes': ['alface crespa', 'escarola', 'frisee chicória', 'lalique', 'romana'],
+                                'Frutas Verdes': ['alface crespa', 'escarola', 'frisee chicoria', 'lalique', 'romana'],
                                 'Frutas Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa']
                             }
                             
@@ -687,7 +695,7 @@ if uploaded_file:
                                 group_day['Balance_Flex'] = group_day['Remaining_VP'] - group_day['Demand_Flex']
                                 
                                 for g_name, items in groups_sub.items():
-                                    mask_g = group_day['Ingredient_Lower'].isin(items)
+                                    mask_g = group_day['Ingredient_Norm'].isin(items)
                                     df_g = group_day[mask_g].copy()
                                     
                                     if not df_g.empty:
@@ -729,14 +737,14 @@ if uploaded_file:
                                 df_processed['Sobra_VP'] = df_processed['Remaining_VP'] - df_processed['Used_VP_Flex']
                                 df_processed['Sobra_VP'] = df_processed['Sobra_VP'].clip(lower=0)
                                 
-                                df_final = pd.merge(df_processed, df_yield_scenarios, left_on='Ingredient_Lower', right_on='Produto', how='left')
+                                df_final = pd.merge(df_processed, df_yield_scenarios, left_on='Ingredient_Norm', right_on='Produto', how='left')
                                 
                                 col_yield = scenario
                                 df_y_pivot = df_yield_scenarios.pivot(index='Produto', columns='Origem', values=col_yield).reset_index()
                                 df_y_pivot.columns.name = None
                                 df_y_pivot = df_y_pivot.rename(columns={'VP': 'Y_VP', 'MERCADO': 'Y_MKT'})
                                 
-                                df_calc = pd.merge(df_processed, df_y_pivot, left_on='Ingredient_Lower', right_on='Produto', how='left')
+                                df_calc = pd.merge(df_processed, df_y_pivot, left_on='Ingredient_Norm', right_on='Produto', how='left')
                                 df_calc['Y_VP'] = df_calc['Y_VP'].fillna(10.0)
                                 df_calc['Y_MKT'] = df_calc['Y_MKT'].fillna(10.0)
                                 
@@ -765,7 +773,20 @@ if uploaded_file:
                                     num_yield = audit_yield.select_dtypes(include=[np.number]).columns
                                     st.dataframe(audit_yield.style.format("{:.2f}", subset=num_yield))
 
-                                # SOBRAS DIÁRIAS (FORMATADO CORRETAMENTE)
+                                # DIAGNÓSTICO DE NOMES (NOVO)
+                                with st.expander("🔍 Diagnóstico de Nomes (Debug)", expanded=False):
+                                    # Lista única da VP
+                                    vp_items = set(df_avail['Hortaliça_Traduzida'].unique())
+                                    # Lista única da Demanda
+                                    dem_items = set(df_kg_daily['Ingredient_Norm'].unique())
+                                    
+                                    missing_in_demand = vp_items - dem_items
+                                    if missing_in_demand:
+                                        st.warning(f"Itens na VP sem match na Fábrica: {', '.join(missing_in_demand)}")
+                                        st.write("Se 'rucula' aparecer aqui, o erro de nome persiste.")
+                                    else:
+                                        st.success("Todos os itens da VP encontraram correspondência na Fábrica!")
+
                                 df_surplus_daily = df_calc[df_calc['Sobra_VP'] > 0]
                                 if not df_surplus_daily.empty:
                                     with st.expander(f"🚜 Sobras Verde Prima (Visão Diária)", expanded=False):
@@ -777,7 +798,6 @@ if uploaded_file:
                                             cols_s_fmt.append(d_str)
                                         df_surplus_view.columns = cols_s_fmt
                                         
-                                        # Aplica formatação segura (apenas onde é float)
                                         st.dataframe(df_surplus_view.style.format("{:.1f}"), use_container_width=True)
 
                                 csv_order = df_daily_view.to_csv().encode('utf-8')
