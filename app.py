@@ -10,7 +10,7 @@ import traceback
 from sklearn.metrics import mean_absolute_percentage_error
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PCP Verdureira - Industrial Intelligence v7.7", layout="wide")
+st.set_page_config(page_title="PCP Verdureira - Industrial Intelligence v7.8", layout="wide")
 
 # ==============================================================================
 # 1. MOTOR DE INTELIGÊNCIA (CLIMA, FERIADOS E PAGAMENTO)
@@ -57,7 +57,7 @@ def get_smart_calendar(start_date, end_date):
     return df_cal.fillna(0)
 
 # ==============================================================================
-# 2. CARGA E TRATAMENTO DE DADOS (SEGURANÇA DE TIPOS)
+# 2. CARGA E TRATAMENTO DE DADOS
 # ==============================================================================
 
 def clean_excel(df):
@@ -145,16 +145,17 @@ def run_ml_forecast(dv):
             temp = pd.merge(temp, l_val, on='SKU', how='left')
         temp = temp.fillna(0)
         temp['Orders'] = np.maximum(0, np.round(model.predict(temp[features])))
+        # REGRA: Domingo e Feriado não faturam
         if d.dayofweek == 6 or temp['IsHoliday'].iloc[0] == 1: temp['Orders'] = 0
         preds_fut.append(temp)
         
     return pd.concat(preds_fut), df_train_full, df_cal[df_cal['Date'] > last_date]
 
 # ==============================================================================
-# 4. INTERFACE E LÓGICA PCP
+# 4. INTERFACE E LÓGICA PCP (v7.8)
 # ==============================================================================
 
-st.title("🌱 Verdureira Agroindústria - Intelligence PCP v7.7")
+st.title("🌱 Verdureira Agroindústria - Intelligence PCP v7.8")
 
 u1, u2 = st.columns(2)
 with u1:
@@ -169,11 +170,10 @@ if f_vendas and f_ficha and f_rend and f_avail:
     scenario_name = st.radio("Cenário de Rendimento:", ["Reativo (1)", "Equilibrado (3)", "Conservador (5)"], index=1, horizontal=True)
     
     if st.button("🚀 Gerar Planejamento Completo"):
-        with st.spinner("Motor de Inteligência Processando..."):
+        with st.spinner("Calculando demanda e esgotando colheita própria..."):
             # 1. FORECAST E CLIMA
             forecast, df_hist, weather_fut = run_ml_forecast(dv)
             
-            # --- QUADRO DE CLIMA COMPLETO ---
             st.divider()
             st.subheader("🌤️ Previsão do Tempo (Próximos 7 Dias)")
             w_disp = weather_fut[['Date', 'Temp_Min', 'Temp_Max', 'Chuva_mm']].copy()
@@ -206,7 +206,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
             total_row = pd.DataFrame([{'Grupo': 'TOTAL GERAL', 'Prev 2026': int(t_curr), 'Real 2025': int(t_ly), 'Var % (25)': f"{((t_curr/t_ly)-1)*100:+.1f}%" if t_ly > 0 else "0%", 'Real 2024': int(t_l2y), 'Var % (24)': f"{((t_curr/t_l2y)-1)*100:+.1f}%" if t_l2y > 0 else "0%"}])
             st.table(pd.concat([df_exec, total_row], ignore_index=True))
 
-            # --- 3. PREVISÃO SKU NA TELA PRINCIPAL ---
+            # 3. PREVISÃO SKU NA TELA
             st.subheader("🗓️ Detalhamento da Previsão de Vendas (Unidades)")
             pivot_fore = forecast.pivot_table(index=['SKU', 'Description'], columns='Date', values='Orders', aggfunc='sum').fillna(0)
             map_dias = {0:'Seg', 1:'Ter', 2:'Qua', 3:'Qui', 4:'Sex', 5:'Sáb', 6:'Dom'}
@@ -214,7 +214,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
             st.dataframe(pivot_fore.astype(int), use_container_width=True)
             st.download_button("📥 Exportar Previsão de Vendas (CSV)", pivot_fore.to_csv().encode('utf-8'), "previsao_vendas.csv", "text/csv")
 
-            # 4. MRP E RIGIDEZ
+            # 4. MRP
             mrp = pd.merge(forecast, dr, on='SKU', how='inner')
             mrp['Total_Kg'] = (mrp['Orders'] * pd.to_numeric(mrp['Comp_mg'], errors='coerce')) / 1000
             mrp['Is_Rigid'] = mrp.apply(lambda r: str(r['Ingredient']).lower() in str(r['Description']).lower(), axis=1)
@@ -224,7 +224,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
             mrp.loc[mrp['Date'].dt.dayofweek == 5, 'Date_PCP'] = mrp['Date'] - timedelta(days=1)
             need_daily = mrp.groupby(['Date_PCP', 'Ingredient', 'Is_Rigid', 'A', 'B', 'C'])['Total_Kg'].sum().reset_index()
 
-            # 5. DISPONIBILIDADE VP
+            # 5. DISPONIBILIDADE E RENDIMENTO
             da_clean = da.groupby('Hortaliça')[['Segunda','Terça','Quarta','Quinta','Sexta']].sum().reset_index()
             map_dias_ext = {0:'Segunda', 1:'Terça', 2:'Quarta', 3:'Quinta', 4:'Sexta', 5:'Sábado', 6:'Domingo'}
             
@@ -237,7 +237,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 y_map.append({'Produto': prod, 'Origem': 'VP' if 'VERDE' in str(forn).upper() else 'MKT', 'Y_Val': val})
             df_y_final = pd.DataFrame(y_map)
 
-            # 6. CASCATA DE SUBSTITUIÇÃO (FIX: DÉFICIT ZERADO)
+            # 6. CASCATA DE SUBSTITUIÇÃO (FIX: SOBRA DOMINGO)
             sub_log = []
             final_rows = []
             groups_sub = {
@@ -247,24 +247,27 @@ if f_vendas and f_ficha and f_rend and f_avail:
             
             for date, g_date in need_daily.groupby('Date_PCP'):
                 day_name = map_dias_ext[date.dayofweek]
-                if day_name not in da_clean.columns: day_name = 'Sexta' # Mirroring
                 
-                y_vp = df_y_final[df_y_final['Origem'] == 'VP'].rename(columns={'Y_Val': 'Y_VP'})
-                vp_stock_raw = da_clean[['Hortaliça', day_name]].copy().rename(columns={day_name: 'Boxes', 'Hortaliça': 'Hort_Low'})
-                vp_stock = pd.merge(vp_stock_raw, y_vp, left_on='Hort_Low', right_on='Produto', how='left')
-                vp_stock['Kg_Avail'] = vp_stock['Boxes'] * vp_stock['Y_VP'].fillna(10.0)
-                stock_map = vp_stock.set_index('Hort_Low')['Kg_Avail'].to_dict()
+                # --- FIX: TRAVA DE FIM DE SEMANA ---
+                # Se for Sábado ou Domingo, a disponibilidade real na VP é 0
+                # Pois a necessidade do sábado já foi puxada para a sexta.
+                if day_name in ['Sábado', 'Domingo']:
+                    stock_map = {} # Zera estoque VP
+                else:
+                    if day_name not in da_clean.columns: day_name = 'Sexta' # Mirroring básico Seg-Sex
+                    y_vp = df_y_final[df_y_final['Origem'] == 'VP'].rename(columns={'Y_Val': 'Y_VP'})
+                    vp_stock_raw = da_clean[['Hortaliça', day_name]].copy().rename(columns={day_name: 'Boxes', 'Hortaliça': 'Hort_Low'})
+                    vp_stock = pd.merge(vp_stock_raw, y_vp, left_on='Hort_Low', right_on='Produto', how='left')
+                    vp_stock['Kg_Avail'] = vp_stock['Boxes'] * vp_stock['Y_VP'].fillna(10.0)
+                    stock_map = vp_stock.set_index('Hort_Low')['Kg_Avail'].to_dict()
 
+                # Processamento da Cascata (A -> B -> C -> Frutas)
                 for idx, row in g_date.iterrows():
                     ing = str(row['Ingredient']).lower().strip()
                     needed = row['Total_Kg']
-                    
-                    # TENTA VP ORIGINAL (A)
                     used_a = min(stock_map.get(ing, 0), needed)
                     stock_map[ing] = stock_map.get(ing, 0) - used_a
                     needed -= used_a
-                    
-                    # TENTA B e C (Se flexível)
                     if not row['Is_Rigid']:
                         for alt in ['B', 'C']:
                             if needed > 0 and str(row[alt]).lower() != 'nan':
@@ -273,10 +276,8 @@ if f_vendas and f_ficha and f_rend and f_avail:
                                 stock_map[ing_alt] = stock_map.get(ing_alt, 0) - used_alt
                                 if used_alt > 0: sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': row[alt], 'Kg': round(used_alt, 1), 'Origem': f'Receita {alt}'})
                                 needed -= used_alt
-                    
                     g_date.at[idx, 'Deficit_Pos_Receita'] = needed
 
-                # TENTA GRUPOS (Verdes/Vermelhas)
                 for g_name, members in groups_sub.items():
                     mask = g_date['Ingredient'].str.lower().str.strip().isin(members) & (~g_date['Is_Rigid'])
                     for idx, row in g_date[mask].iterrows():
@@ -290,9 +291,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
                                     sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': m, 'Kg': round(take, 1), 'Origem': 'Grupo '+g_name})
                         g_date.at[idx, 'Deficit_Final'] = max(0, needed)
                     
-                    # Se o item não está em nenhum grupo e não tem na VP, o déficit final é o déficit da receita
-                    g_date['Deficit_Final'] = g_date['Deficit_Final'].fillna(g_date['Deficit_Pos_Receita'])
-
+                g_date['Deficit_Final'] = g_date['Deficit_Final'].fillna(g_date['Deficit_Pos_Receita'])
                 g_date['Sobra_Fazenda'] = g_date['Ingredient'].str.lower().str.strip().map(stock_map).fillna(0)
                 final_rows.append(g_date)
 
@@ -301,7 +300,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
             df_final = pd.merge(df_final, y_mkt, left_on=df_final['Ingredient'].str.lower().str.strip(), right_on='Produto', how='left')
             df_final['Boxes_Buy'] = np.ceil(df_final['Deficit_Final'] / df_final['Y_MKT'].fillna(10.0))
 
-            # --- 7. EXIBIÇÃO DE RESULTADOS FINAIS ---
+            # --- 7. EXIBIÇÃO FINAL ---
             st.divider()
             st.subheader("🛒 Ordem de Compra de Mercado (Caixas - D+1)")
             today_ts = pd.Timestamp.now().normalize()
@@ -313,13 +312,15 @@ if f_vendas and f_ficha and f_rend and f_avail:
             col_rel1, col_rel2 = st.columns(2)
             with col_rel1:
                 st.subheader("🚜 Sobras Verde Prima (Kg)")
+                # Filtra apenas sobras reais (acima de 0.1kg)
                 pivot_sobra = df_final[df_final['Date_PCP'] > today_ts].pivot_table(index='Ingredient', columns='Date_PCP', values='Sobra_Fazenda', aggfunc='sum').fillna(0)
+                pivot_sobra = pivot_sobra[pivot_sobra.sum(axis=1) > 0.1]
                 st.dataframe(pivot_sobra.style.format("{:.1f}"), use_container_width=True)
             
             with col_rel2:
                 st.subheader("🔄 Log de Substituições")
                 if sub_log:
                     st.download_button("📥 Exportar Log de Substituições (CSV)", pd.DataFrame(sub_log).to_csv().encode('utf-8'), "log_substituicoes.csv", "text/csv")
-                    st.info(f"Foram realizadas {len(sub_log)} substituições inteligentes para economizar compra de mercado.")
+                    st.info(f"Substituições inteligentes realizadas para otimizar o campo.")
                 else:
                     st.info("Nenhuma substituição necessária.")
