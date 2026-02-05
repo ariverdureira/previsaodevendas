@@ -10,7 +10,7 @@ import traceback
 from sklearn.metrics import mean_absolute_percentage_error
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PCP Verdureira - Inteligência Industrial v8.9", layout="wide")
+st.set_page_config(page_title="PCP Verdureira - Inteligência Industrial v9.0", layout="wide")
 
 # ==============================================================================
 # 1. MOTOR DE INTELIGÊNCIA (CLIMA COMPLETO, FERIADOS E PAGAMENTO)
@@ -56,12 +56,13 @@ def get_smart_calendar(start_date, end_date):
     return df_cal.fillna(0)
 
 # ==============================================================================
-# 2. CARGA E TRATAMENTO DE DADOS (SEGURANÇA DE TIPOS E NOMES)
+# 2. CARGA E BLINDAGEM DE DADOS (DEDUPLICAÇÃO E TRATAMENTO DE TIPOS)
 # ==============================================================================
 
 def normalize_name(name):
     if pd.isna(name): return ""
     n = str(name).lower().strip()
+    # Remove termos genéricos para facilitar o "match" entre campo e fábrica
     n = n.replace("alface ", "").replace("mini ", "").replace("verde", "").strip()
     if n in ['lollo', 'lollo roxa']: n = 'lollo rossa'
     return n
@@ -82,7 +83,7 @@ def robust_load(file, name, is_avail=False):
     df = df.loc[:, ~df.columns.duplicated()].copy()
     df.columns = [str(c).strip() for c in df.columns]
     
-    # Blindagem de Texto para evitar erro Arrow
+    # Blindagem de tipos para evitar ArrowTypeError
     for col in df.columns:
         if any(x in col for x in ['SKU', 'Cod', 'Código', 'Description', 'Descrição', 'Hortaliça', 'Ingredient', 'Materia Prima']):
             df[col] = df[col].astype(str).str.strip()
@@ -107,9 +108,7 @@ def load_all_pcp_data(f_v, f_r, f_y, f_a):
             dr[col+'_Norm'] = dr[col].apply(normalize_name)
 
     dy = robust_load(f_y, "Rendimento")
-    # FIX: Renomeia 'Data' para 'Date' para evitar o crash de sort_values
-    dy = dy.rename(columns={'Data': 'Date'})
-    dy['Date'] = pd.to_datetime(dy['Date'], errors='coerce')
+    dy['Date'] = pd.to_datetime(dy.get('Data', dy.get('Date')), errors='coerce')
     dy['Produto_Norm'] = dy['Produto'].apply(normalize_name)
 
     da = robust_load(f_a, "Disponibilidade", is_avail=True)
@@ -170,10 +169,10 @@ def run_ml_forecast(dv):
     return pd.concat(preds_fut), df_train, df_cal[df_cal['Date'] > last_date]
 
 # ==============================================================================
-# 4. INTERFACE E LÓGICA DE ABASTECIMENTO (v8.9)
+# 4. INTERFACE E LÓGICA DE ABASTECIMENTO (v9.0)
 # ==============================================================================
 
-st.title("🌱 Verdureira Agroindústria - Inteligência PCP v8.9")
+st.title("🌱 Verdureira Agroindústria - Inteligência PCP v9.0")
 
 u1, u2 = st.columns(2)
 with u1:
@@ -189,7 +188,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
     
     if st.button("🚀 Gerar Planejamento Completo"):
         try:
-            with st.spinner("IA Processando dados, lotes de 48h e clima..."):
+            with st.spinner("IA Processando lotes e climas..."):
                 forecast, df_hist, weather_fut = run_ml_forecast(dv)
                 
                 # --- 1. CLIMA ---
@@ -200,7 +199,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 st.dataframe(w_disp.set_index('Date').T, use_container_width=True)
                 
                 # --- 2. RESUMO EXECUTIVO ---
-                st.subheader("📊 Resumo Executivo Trienal (Semana Comercial)")
+                st.subheader("📊 Resumo Executivo Trienal (Comparativo Semanal)")
                 f_s = forecast['Date'].min()
                 ly_s, l2y_s = f_s - timedelta(days=364), f_s - timedelta(days=728)
                 res_list = []
@@ -218,17 +217,12 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 total_row = pd.DataFrame([{'Grupo': 'TOTAL GERAL', 'IA 2026': int(df_exec['IA 2026'].sum()), 'Real 2025': int(df_exec['Real 2025'].sum()), 'Real 2024': int(df_exec['Real 2024'].sum())}])
                 st.table(pd.concat([df_exec, total_row], ignore_index=True))
 
-                # --- 3. PREVISÃO SKU (FIX ARROW) ---
-                st.subheader("🗓️ Previsão Detalhada SKU/Dia (Unidades)")
+                # --- 3. PREVISÃO SKU ---
+                st.subheader("🗓️ Detalhamento de Previsão de Vendas (Unidades)")
                 pivot_fore = forecast.pivot_table(index=['SKU', 'Description'], columns='Date', values='Orders', aggfunc='sum').fillna(0)
                 map_dias = {0:'Seg', 1:'Ter', 2:'Qua', 3:'Qui', 4:'Sex', 5:'Sáb', 6:'Dom'}
                 pivot_fore.columns = [f"{c.strftime('%d/%m')} ({map_dias[c.dayofweek]})" for c in pivot_fore.columns]
-                
-                # FIX: SKU e Description resetados para string pura para não quebrar visualização
-                pivot_display = pivot_fore.round(0).reset_index()
-                pivot_display['SKU'] = pivot_display['SKU'].astype(str)
-                pivot_display['Description'] = pivot_display['Description'].astype(str)
-                st.dataframe(pivot_display, use_container_width=True, hide_index=True)
+                st.dataframe(pivot_fore.round(0).reset_index(), use_container_width=True, hide_index=True)
                 st.download_button("📥 Baixar Previsão CSV", pivot_fore.to_csv().encode('utf-8'), "previsao.csv", "text/csv")
 
                 # --- 4. CASCATA PCP E ROLAGEM 48H ---
@@ -239,13 +233,12 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 mrp.loc[mrp['Date'].dt.dayofweek == 5, 'Date_Calc'] = mrp['Date'] - timedelta(days=1)
                 
                 need_daily = mrp.groupby(['Date_Calc', 'Ingredient_Norm', 'Is_Rigid', 'A_Norm', 'B_Norm', 'C_Norm', 'Ingredient'])['Total_Kg'].sum().reset_index()
-                # Chave Produto_Norm para casar com rendimento
                 need_daily = need_daily.rename(columns={'Ingredient_Norm': 'Produto_Norm'})
 
                 da_clean = da.groupby('Hort_Norm')[['Segunda','Terça','Quarta','Quinta','Sexta']].sum().reset_index()
                 y_map = []
                 for (prod, forn), g in dy.groupby(['Produto_Norm', 'Fornecedor']):
-                    g = g.sort_values('Date', ascending=False) # Agora 'Date' existe!
+                    g = g.sort_values('Date', ascending=False)
                     val = g['Rendimento'].iloc[0] if "1" in scenario_name else (g['Rendimento'].head(3).mean() if "3" in scenario_name else g['Rendimento'].head(5).mean())
                     y_map.append({'Produto_Norm': prod, 'Origem': 'VP' if 'VERDE' in str(forn).upper() else 'MKT', 'Y_Val': val})
                 df_y_f = pd.DataFrame(y_map)
@@ -253,31 +246,38 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 pool_estoque = {}
                 sub_log, rollover_log, final_rows = [], [], []
                 map_ext = {0:'Segunda', 1:'Terça', 2:'Quarta', 3:'Quinta', 4:'Sexta', 5:'Sábado', 6:'Domingo'}
+                
+                # GRUPO DE FRUTAS REVISADO
                 groups_sub = {
-                    'Verdes': ['crespa', 'escarola', 'chicória', 'frisee chicória', 'lalique', 'romana', 'espinafre', 'mini lisa', 'agrião', 'mini agrião'],
+                    'Verdes': ['crespa', 'escarola', 'chicória', 'frisee chicória', 'lalique', 'romana', 'espinafre', 'mini lisa', 'agrião', 'mini agrião', 'mini romana'],
                     'Vermelhas': ['frisee roxa', 'lollo rossa', 'mini lisa roxa']
                 }
 
                 for date, g_date in need_daily.sort_values('Date_Calc').groupby('Date_Calc'):
                     day_name = map_ext[date.dayofweek]
+                    
+                    # Log de Rolagem antes do consumo
                     for it, lots in pool_estoque.items():
                         q24 = sum(l['qty'] for l in lots if l['expiry'] == date + timedelta(days=1))
                         q48 = sum(l['qty'] for l in lots if l['expiry'] == date)
-                        if q24 > 0.1 or q48 > 0.1: rollover_log.append({'Data': date.strftime('%d/%m'), 'Item': it, 'Sobra_24h': round(q24,1), 'Sobra_48h': round(q48,1)})
+                        if q24 > 0.1 or q48 > 0.1:
+                            rollover_log.append({'Data': date.strftime('%d/%m'), 'Item': it, 'Sobra_24h': round(q24,1), 'Sobra_48h': round(q48,1)})
 
                     if day_name in ['Sábado', 'Domingo']:
                         pool_estoque = {}
                     else:
-                        target_col = day_name if day_name in da_clean.columns else 'Sexta'
+                        col_name = day_name if day_name in da_clean.columns else 'Sexta'
                         y_vp = df_y_f[df_y_f['Origem'] == 'VP'].rename(columns={'Y_Val': 'Y_VP'})
-                        col_raw = da_clean[['Hort_Norm', target_col]].copy().rename(columns={target_col: 'Boxes', 'Hort_Norm': 'Produto_Norm'})
+                        col_raw = da_clean[['Hort_Norm', col_name]].copy().rename(columns={col_name: 'Boxes', 'Hort_Norm': 'Produto_Norm'})
                         col_kg = pd.merge(col_raw, y_vp, on='Produto_Norm', how='left')
                         col_kg['Kg'] = col_kg['Boxes'] * col_kg['Y_VP'].fillna(10.0)
+                        
                         for _, rc in col_kg.iterrows():
                             item = rc['Produto_Norm']
                             if item not in pool_estoque: pool_estoque[item] = []
                             if rc['Kg'] > 0: pool_estoque[item].append({'qty': rc['Kg'], 'expiry': date + timedelta(days=2)})
 
+                    # FIFO e Limpeza
                     for it in pool_estoque:
                         pool_estoque[it] = [l for l in pool_estoque[it] if l['expiry'] > date and l['qty'] > 0.1]
 
@@ -287,7 +287,8 @@ if f_vendas and f_ficha and f_rend and f_avail:
                         pool_estoque[item_name] = sorted(pool_estoque[item_name], key=lambda x: x['expiry'])
                         for lot in pool_estoque[item_name]:
                             if amount <= 0: break
-                            draw = min(lot['qty'], amount); lot['qty'] -= draw; amount -= draw; taken += draw
+                            draw = min(lot['qty'], amount)
+                            lot['qty'] -= draw; amount -= draw; taken += draw
                         return taken
 
                     for idx, row in g_date.iterrows():
@@ -312,7 +313,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
                                     if draw_g > 0:
                                         sub_log.append({'Data': date.strftime('%d/%m'), 'Item': row['Ingredient'], 'Subst': m, 'Kg': round(draw_g, 1), 'Origem': 'Grupo '+g_name})
                                         needed -= draw_g
-                            g_date.at[idx, 'Def_Final'] = max(0, needed)
+                            g_date.at[idx, 'Def_Final'] = max(0, int(needed))
                     
                     g_date['Def_Final'] = g_date['Def_Final'].fillna(g_date['Def_Pos_Rec'])
                     g_date['Sobra_Fazenda'] = g_date['Produto_Norm'].apply(lambda x: sum([l['qty'] for l in pool_estoque.get(x, [])]))
@@ -323,7 +324,7 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 df_final = pd.merge(df_final, y_mkt, on='Produto_Norm', how='left')
                 df_final['Boxes_Buy'] = np.ceil(df_final['Def_Final'] / df_final['Y_MKT'].fillna(10.0))
 
-                # --- 5. RESULTADOS ---
+                # --- 5. RESULTADOS FINAIS ---
                 st.divider()
                 st.subheader("🛒 Ordem de Compra de Mercado (Caixas - D+1)")
                 pivot_buy = df_final[df_final['Date_Calc'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date_Calc', values='Boxes_Buy', aggfunc='sum').fillna(0)
@@ -335,11 +336,13 @@ if f_vendas and f_ficha and f_rend and f_avail:
                 with col_a:
                     st.subheader("🚜 Sobras Reais na Fazenda (Kg)")
                     pivot_sobra = df_final[df_final['Date_Calc'] > pd.Timestamp.now()].pivot_table(index='Ingredient', columns='Date_Calc', values='Sobra_Fazenda', aggfunc='sum').fillna(0)
-                    st.dataframe(pivot_sobra[pivot_sobra.sum(axis=1) > 0.1].round(1), use_container_width=True)
+                    pivot_sobra_filtered = pivot_sobra[pivot_sobra.sum(axis=1) > 0.1].round(1)
+                    st.dataframe(pivot_sobra_filtered, use_container_width=True)
+                    st.download_button("📥 Baixar Relatório de Sobras", pivot_sobra_filtered.to_csv().encode('utf-8'), "sobras_fazenda.csv", "text/csv")
                 with col_b:
                     st.subheader("📋 Relatórios de Auditoria")
-                    if rollover_log: st.download_button("📥 Baixar Relatório de Rolagem", pd.DataFrame(rollover_log).to_csv().encode('utf-8'), "rolagem.csv", "text/csv")
-                    if sub_log: st.download_button("📥 Baixar Log de Substituições", pd.DataFrame(sub_log).to_csv().encode('utf-8'), "subst.csv", "text/csv")
+                    if rollover_log: st.download_button("📥 Baixar Relatório de Rolagem (24h/48h)", pd.DataFrame(rollover_log).to_csv().encode('utf-8'), "rolagem.csv", "text/csv")
+                    if sub_log: st.download_button("📥 Baixar Log de Substituições", pd.DataFrame(sub_log).to_csv().encode('utf-8'), "substituicoes.csv", "text/csv")
 
         except Exception as e:
             st.error(f"Erro no processamento: {e}")
