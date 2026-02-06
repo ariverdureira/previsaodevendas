@@ -180,7 +180,6 @@ def load_data(uploaded_file):
 @st.cache_data
 def load_recipe_data(uploaded_file):
     try:
-        # Tenta ler normal primeiro
         try: df = pd.read_csv(uploaded_file, sep=',')
         except: df = pd.read_excel(uploaded_file)
         
@@ -221,7 +220,7 @@ def load_yield_data_scenarios(uploaded_file):
         df = df[pd.to_numeric(df['Rendimento'], errors='coerce') > 0]
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
         
-        # Normalização rigorosa para cruzar com Ficha Técnica
+        # Normalização rigorosa
         df['Produto'] = df['Produto'].apply(normalize_text)
         df['Fornecedor'] = df['Fornecedor'].astype(str).str.strip().str.upper()
         df['Origem'] = np.where(df['Fornecedor'] == 'VERDE PRIMA', 'VP', 'MERCADO')
@@ -230,10 +229,9 @@ def load_yield_data_scenarios(uploaded_file):
         
         results = []
         for (prod, origem), group in df.groupby(['Produto', 'Origem']):
-            # Cenários de Cálculo
-            val_1 = group['Rendimento'].iloc[0] # Último
-            val_3 = group['Rendimento'].head(3).mean() # Média 3
-            val_5 = group['Rendimento'].head(5).mean() # Média 5
+            val_1 = group['Rendimento'].iloc[0] 
+            val_3 = group['Rendimento'].head(3).mean() 
+            val_5 = group['Rendimento'].head(5).mean() 
             
             results.append({
                 'Produto': prod,
@@ -252,24 +250,40 @@ def load_yield_data_scenarios(uploaded_file):
 def load_availability_data(uploaded_file):
     try:
         # Lógica inteligente para achar o cabeçalho correto
-        # Tenta header=0, se falhar tenta header=1
+        df = None
         try: 
-            df = pd.read_csv(uploaded_file)
-            if 'Hortaliça' not in df.columns and df.shape[0] > 0:
-                 df = pd.read_csv(uploaded_file, header=1)
+            # Tenta header=0
+            temp = pd.read_csv(uploaded_file)
+            if 'Hortaliça' in temp.columns:
+                df = temp
+            else:
+                # Tenta header=1
+                temp = pd.read_csv(uploaded_file, header=1)
+                if 'Hortaliça' in temp.columns:
+                    df = temp
         except: 
-            try: df = pd.read_excel(uploaded_file)
-            except: df = pd.read_excel(uploaded_file, header=1)
+            pass
             
+        if df is None:
+            try: 
+                temp = pd.read_excel(uploaded_file)
+                if 'Hortaliça' in temp.columns:
+                    df = temp
+                else:
+                    df = pd.read_excel(uploaded_file, header=1)
+            except: 
+                pass
+        
+        if df is None: return pd.DataFrame()
+
         df.columns = df.columns.str.strip()
         
-        # Mapa de Tradução (Fazenda -> Fábrica)
         name_map = {
             'crespa verde': 'alface crespa',
             'frizzy roxa': 'frisee roxa',
             'lollo': 'lollo rossa',
             'chicoria': 'frisee chicoria',
-            'barlach': 'barlach', # Novo item adicionado
+            'barlach': 'barlach', 
         }
         
         if 'Hortaliça' in df.columns:
@@ -281,14 +295,12 @@ def load_availability_data(uploaded_file):
             
             df['Hortaliça_Traduzida'] = df['Hortaliça_Norm'].apply(translate_name)
             
-            # Identifica colunas de dias (ignora espaços extras "Segunda ")
             cols_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta']
             cols_existentes = []
             for c in df.columns:
                 if c.strip() in cols_dias:
                     cols_existentes.append(c)
             
-            # Renomeia para remover espaços e padronizar
             rename_dict = {c: c.strip() for c in cols_existentes}
             df = df.rename(columns=rename_dict)
             cols_clean = list(rename_dict.values())
@@ -311,7 +323,7 @@ def load_availability_data(uploaded_file):
 def treat_data_interruption(df):
     """
     Trata a anomalia de demanda (Fev-Ago 2025).
-    Substitui os dados reais por uma interpolação para não 'sujar' o aprendizado.
+    FIX: Define índice como Data para interpolação funcionar.
     """
     df_clean = df.copy()
     start_anomaly = pd.Timestamp('2025-02-01')
@@ -327,10 +339,17 @@ def treat_data_interruption(df):
     if mask_anomaly.any():
         df_clean.loc[mask_anomaly, 'Orders'] = np.nan
         df_clean = df_clean.sort_values(['SKU', 'Date'])
-        # Interpolação linear temporal
+        
+        # --- FIX PARA O ERRO 'time-weighted interpolation' ---
+        df_clean = df_clean.set_index('Date') 
+        
         df_clean['Orders'] = df_clean.groupby('SKU')['Orders'].transform(
             lambda x: x.interpolate(method='time', limit_direction='both')
         )
+        
+        df_clean = df_clean.reset_index()
+        # -----------------------------------------------------
+        
         df_clean['Orders'] = df_clean['Orders'].fillna(0)
         
     return df_clean
@@ -349,7 +368,6 @@ def clean_outliers(df):
         mask = df['SKU'] == sku
         series = df.loc[mask, 'Orders']
         if len(series) < 5: continue
-        # Remove picos absurdos (Outliers)
         roll_med = series.rolling(14, min_periods=1, center=True).median()
         is_outlier = series > (roll_med * 4)
         if is_outlier.any():
@@ -371,7 +389,6 @@ def generate_features(df):
 def calculate_backtest_accuracy(df_raw):
     """Calcula a acurácia (WAPE) dos últimos 7 dias REAIS (Prova Real)."""
     try:
-        # Aplica regra de anomalia antes de testar
         df_treated = treat_data_interruption(df_raw)
         df_clean = filter_history_vero(df_treated)
         df_clean = clean_outliers(df_clean)
@@ -418,7 +435,6 @@ def calculate_backtest_accuracy(df_raw):
         
         if X_train.empty or X_test.empty: return None, None, None
         
-        # Modelo XGBoost rápido para Backtest
         model = XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, n_jobs=-1, random_state=42)
         model.fit(X_train[features], X_train['Orders'])
         
@@ -429,7 +445,6 @@ def calculate_backtest_accuracy(df_raw):
         sum_abs_error = np.sum(np.abs(actuals - preds))
         sum_actuals = np.sum(actuals)
         
-        # WAPE (Weighted Absolute Percentage Error)
         wape = sum_abs_error / sum_actuals if sum_actuals > 0 else 0
         accuracy = max(0, 1 - wape)
         
@@ -440,7 +455,6 @@ def calculate_backtest_accuracy(df_raw):
         return None, None, None
 
 def run_forecast(df_raw, days_ahead=8):
-    # APLICAÇÃO DA REGRA DE HIGIENIZAÇÃO DE ANOMALIA
     df_treated = treat_data_interruption(df_raw)
     
     df_train_base = filter_history_vero(df_treated)
@@ -595,7 +609,6 @@ if uploaded_file:
 
             with st.spinner("Otimizando modelo (Auto-ML) e Analisando Dados..."):
                 try:
-                    # HORIZONTE DE 8 DIAS (NOVO)
                     days_horizon = 8
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=days_horizon)
                     if not forecast_result.empty:
@@ -634,7 +647,6 @@ if uploaded_file:
             # --- 3. RESUMO EXECUTIVO ---
             st.subheader("📊 Resumo Executivo")
             
-            # Horizonte dinâmico para resumo (8 dias)
             days_summary = 8
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=days_summary)
@@ -775,7 +787,6 @@ if uploaded_file:
                             df_proc = pd.merge(df_kg_daily, df_avail_melt, left_on=['Ingredient_Norm', 'DayName'], right_on=['Hortaliça_Traduzida', 'DayName'], how='left')
                             df_proc['Kg_Available'] = df_proc['Kg_Available'].fillna(0)
                             
-                            # FILTRO DATA DINÂMICO (Ignora passado)
                             today = pd.Timestamp.now().normalize()
                             df_proc = df_proc[df_proc['Date'] > today]
                             
