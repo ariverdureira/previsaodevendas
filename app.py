@@ -7,6 +7,8 @@ import requests
 import holidays
 import traceback
 import re
+from google import genai
+from sklearn.metrics import mean_absolute_error
 import unicodedata
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -207,7 +209,7 @@ def load_availability_data(uploaded_file):
             'frizzy roxa': 'frisee roxa',
             'lollo': 'lollo rossa',
             'chicoria': 'frisee chicoria',
-            'barlach': 'barlach', # Garante que barlach passe
+            'barlach': 'barlach', 
         }
         
         if 'Hortaliça' in df.columns:
@@ -343,7 +345,7 @@ def calculate_backtest_accuracy(df_raw):
         print(f"Erro Backtest: {e}")
         return None, None, None
 
-def run_forecast(df_raw, days_ahead=7):
+def run_forecast(df_raw, days_ahead=8):
     df_train_base = filter_history_vero(df_raw)
     df_train_base = clean_outliers(df_train_base)
     
@@ -496,7 +498,9 @@ if uploaded_file:
 
             with st.spinner("Otimizando modelo (Auto-ML) e Analisando Dados..."):
                 try:
-                    forecast_result, weather_result = run_forecast(df_raw, days_ahead=7)
+                    # HORIZONTE DE 8 DIAS (NOVO)
+                    days_horizon = 8
+                    forecast_result, weather_result = run_forecast(df_raw, days_ahead=days_horizon)
                     if not forecast_result.empty:
                         st.session_state['forecast_data'] = forecast_result
                         st.session_state['weather_data'] = weather_result
@@ -513,7 +517,7 @@ if uploaded_file:
             if not weather_df.empty:
                 st.divider()
                 st.subheader("🌤️ Clima da Semana")
-                w_disp = weather_df.head(7).copy()
+                w_disp = weather_df.head(8).copy()
                 w_disp['Date'] = w_disp['Date'].dt.strftime('%d/%m')
                 w_disp = w_disp.rename(columns={'Date': 'Data', 'Temp_Avg': 'Temp. Média (°C)', 'Rain_mm': 'Chuva (mm)'})
                 w_disp['Temp. Média (°C)'] = w_disp['Temp. Média (°C)'].map('{:.1f}'.format)
@@ -533,8 +537,10 @@ if uploaded_file:
             # --- 3. RESUMO EXECUTIVO ---
             st.subheader("📊 Resumo Executivo")
             
+            # Horizonte dinâmico para resumo (8 dias)
+            days_summary = 8
             f_start = max_date + timedelta(days=1)
-            f_end = max_date + timedelta(days=7)
+            f_end = max_date + timedelta(days=days_summary)
             
             ly_start = f_start - timedelta(weeks=52)
             ly_end = f_end - timedelta(weeks=52)
@@ -558,7 +564,7 @@ if uploaded_file:
                 p_2y = ((v_curr / v_2y) - 1) * 100 if v_2y > 0 else 0
                 summary.append({
                     'Grupo': g,
-                    'Previsão 7d': int(v_curr),
+                    'Previsão 8d': int(v_curr),
                     str_ly: int(v_ly),
                     'Var % (vs 25)': f"{p_ly:+.1f}%",
                     str_2y: int(v_2y),
@@ -573,7 +579,7 @@ if uploaded_file:
             
             summary.append({
                 'Grupo': 'TOTAL GERAL',
-                'Previsão 7d': int(tot_cur),
+                'Previsão 8d': int(tot_cur),
                 str_ly: int(tot_ly),
                 'Var % (vs 25)': f"{pt_ly:+.1f}%",
                 str_2y: int(tot_2y),
@@ -582,7 +588,7 @@ if uploaded_file:
             
             df_summary = pd.DataFrame(summary)
             st.dataframe(df_summary, hide_index=True, use_container_width=True)
-            st.caption(f"ℹ️ As datas de comparação seguem a lógica de 'Semana Comercial' (Alinhamento por Dia da Semana).")
+            st.caption(f"ℹ️ As datas de comparação seguem a lógica de 'Semana Comercial' ({days_summary} dias).")
             
             # --- 4. PREVISÃO DETALHADA ---
             st.divider()
@@ -621,6 +627,7 @@ if uploaded_file:
                     
                     forecast['SKU_Str'] = forecast['SKU'].astype(str).str.strip()
                     df_recipe['SKU_Str'] = df_recipe['SKU'].astype(str).str.strip()
+                    # Filtra previsão apenas para o horizonte
                     mask_fore = (forecast['Date'] >= f_start) & (forecast['Date'] <= f_end)
                     df_mrp = pd.merge(forecast[mask_fore], df_recipe, on='SKU_Str', how='inner')
                     df_mrp['Total_Kg'] = (df_mrp['Orders'] * df_mrp['Weight_g']) / 1000
@@ -754,8 +761,8 @@ if uploaded_file:
                                     d_str = d_str.replace('Mon', 'Seg').replace('Tue', 'Ter').replace('Wed', 'Qua').replace('Thu', 'Qui').replace('Fri', 'Sex')
                                     cols_fmt.append(d_str)
                                 df_daily_view.columns = cols_fmt
-                                df_daily_view['TOTAL SEMANA'] = df_daily_view.sum(axis=1)
-                                df_daily_view = df_daily_view[df_daily_view['TOTAL SEMANA'] > 0]
+                                df_daily_view['TOTAL PERÍODO'] = df_daily_view.sum(axis=1)
+                                df_daily_view = df_daily_view[df_daily_view['TOTAL PERÍODO'] > 0]
                                 st.dataframe(df_daily_view.style.format("{:.0f}"), use_container_width=True)
                                 
                                 if log_substitutions:
@@ -768,11 +775,8 @@ if uploaded_file:
                                     num_yield = audit_yield.select_dtypes(include=[np.number]).columns
                                     st.dataframe(audit_yield.style.format("{:.2f}", subset=num_yield))
 
-                                # DIAGNÓSTICO DE NOMES (COM DEBUG DE RÚCULA)
                                 with st.expander("🔍 Diagnóstico de Nomes e Match (Debug)", expanded=False):
-                                    # Lista única da VP
                                     vp_items = set(df_avail['Hortaliça_Traduzida'].unique())
-                                    # Lista única da Demanda
                                     dem_items = set(df_kg_daily['Ingredient_Norm'].unique())
                                     
                                     missing_in_demand = vp_items - dem_items
@@ -780,7 +784,6 @@ if uploaded_file:
                                         st.warning(f"Itens na VP sem match na Fábrica: {', '.join(missing_in_demand)}")
                                     
                                     st.write("--- Raio-X Rúcula ---")
-                                    # Filtra tudo que parece rúcula
                                     df_rucula = df_calc[df_calc['Ingredient_Norm'].str.contains('rucula', na=False)]
                                     if not df_rucula.empty:
                                         cols_rucula = ['Date', 'Ingredient', 'Total_Kg', 'Kg_Available', 'Sobra_VP', 'Kg_Mkt']
