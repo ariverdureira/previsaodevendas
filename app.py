@@ -12,20 +12,22 @@ from sklearn.metrics import mean_absolute_error
 import unicodedata
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="PCP Verdureira", layout="wide")
+st.set_page_config(page_title="PCP Verdureira - Máquina Final", layout="wide")
 
 # ==============================================================================
-# 1. FUNÇÕES AUXILIARES E CARGAS
+# 1. FUNÇÕES AUXILIARES, NORMALIZAÇÃO E DADOS EXTERNOS
 # ==============================================================================
 
 def normalize_text(text):
-    """Remove acentos e espaços, e coloca em minúsculo para garantir o match"""
+    """Remove acentos, espaços extras e padroniza para minúsculo para garantir o match."""
     if not isinstance(text, str):
         return str(text)
+    # Normaliza unicode (ex: ç -> c, á -> a, ã -> a)
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII')
     return text.lower().strip()
 
 def get_holidays_calendar(start_date, end_date):
+    """Gera calendário de feriados e datas comemorativas (Sazonalidade)."""
     try:
         br_holidays = holidays.Brazil(subdiv='SP', state='SP')
         high_impact_fixed = {(12, 25): "Natal", (1, 1): "Ano Novo"}
@@ -33,36 +35,46 @@ def get_holidays_calendar(start_date, end_date):
         years = list(range(start_date.year, end_date.year + 1))
         mothers_days = []
         fathers_days = []
+        
         for year in years:
+            # Dia das Mães (2º domingo de maio)
             may_sundays = pd.date_range(start=f'{year}-05-01', end=f'{year}-05-31', freq='W-SUN')
             if len(may_sundays) >= 2: mothers_days.append(may_sundays[1].date())
+            # Dia dos Pais (2º domingo de agosto)
             aug_sundays = pd.date_range(start=f'{year}-08-01', end=f'{year}-08-31', freq='W-SUN')
             if len(aug_sundays) >= 2: fathers_days.append(aug_sundays[1].date())
+            
         date_range = pd.date_range(start_date, end_date)
         for d in date_range:
             d_date = d.date()
             is_hol = 0
             is_high = 0
+            
             if d_date in br_holidays:
                 is_hol = 1
                 if (d.month, d.day) in high_impact_fixed: is_high = 1
+                if br_holidays.get(d_date) == "Sexta-feira Santa": is_high = 1
+            
             if d_date in mothers_days or d_date in fathers_days:
                 is_hol = 1 
                 is_high = 1 
-            if d_date in br_holidays and br_holidays.get(d_date) == "Sexta-feira Santa":
-                 is_high = 1
+                
             data.append({'Date': d, 'IsHoliday': is_hol, 'IsHighImpact': is_high})
         return pd.DataFrame(data)
     except:
+        # Fallback se a biblioteca falhar
         d_range = pd.date_range(start_date, end_date)
         return pd.DataFrame({'Date': d_range, 'IsHoliday': 0, 'IsHighImpact': 0})
 
 @st.cache_data(ttl=3600)
 def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
+    """Busca dados climáticos históricos e previsão futura (Open-Meteo)."""
     try:
         today = pd.Timestamp.now().normalize()
         hist_end = min(end_date, today - timedelta(days=2))
         df_hist = pd.DataFrame()
+        
+        # 1. Histórico
         if start_date < hist_end:
             url_hist = "https://archive-api.open-meteo.com/v1/archive"
             params_hist = {
@@ -77,6 +89,8 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
                 dates = pd.to_datetime(r_hist['daily']['time'])
                 t_avg = (np.array(r_hist['daily']['temperature_2m_max']) + np.array(r_hist['daily']['temperature_2m_min'])) / 2
                 df_hist = pd.DataFrame({'Date': dates, 'Temp_Avg': t_avg, 'Rain_mm': r_hist['daily']['precipitation_sum']})
+        
+        # 2. Previsão
         df_fore = pd.DataFrame()
         if end_date >= today:
             url_fore = "https://api.open-meteo.com/v1/forecast"
@@ -91,6 +105,8 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
                 dates = pd.to_datetime(r_fore['daily']['time'])
                 t_avg = (np.array(r_fore['daily']['temperature_2m_max']) + np.array(r_fore['daily']['temperature_2m_min'])) / 2
                 df_fore = pd.DataFrame({'Date': dates, 'Temp_Avg': t_avg, 'Rain_mm': r_fore['daily']['precipitation_sum']})
+        
+        # Consolida
         df_full = pd.concat([df_hist, df_fore]).drop_duplicates(subset=['Date'], keep='last').sort_values('Date')
         df_full = df_full[(df_full['Date'] >= start_date) & (df_full['Date'] <= end_date)]
         return df_full
@@ -98,22 +114,39 @@ def get_weather_data(start_date, end_date, lat=-23.55, lon=-46.63):
         return None
 
 def classify_group(desc):
+    """Classifica produtos em grupos estratégicos."""
     if not isinstance(desc, str): return 'Outros'
     txt = normalize_text(desc)
+    
     if 'americana bola' in txt: return 'Americana Bola'
+    
     vero_keys = ['vero', 'primavera', 'roxa', 'mix', 'repolho', 'couve', 'rucula hg']
     if any(x in txt for x in vero_keys): return 'Vero'
+    
     if 'mini' in txt: return 'Minis'
-    if 'insalata' in txt:
-        match = re.search(r'(\d+)\s*g', txt)
-        if match:
-            weight = int(match.group(1))
-            if weight > 100: return 'Saladas'
-    legumes_keys = ['legume', 'cenoura', 'beterraba', 'abobrinha', 'batata', 'mandioca', 'mandioquinha', 'sopa', 'grao de bico', 'grão de bico', 'lentilha', 'pinhao', 'pinhão', 'quinoa', 'milho']
+    
+    # Regra de peso para separar Insalata grande de pequena
+    match = re.search(r'(\d+)\s*g', txt)
+    if match and 'insalata' in txt:
+        weight = int(match.group(1))
+        if weight > 100: return 'Saladas'
+        
+    legumes_keys = ['legume', 'cenoura', 'beterraba', 'abobrinha', 'batata', 'mandioca', 'mandioquinha', 'sopa', 'grao de bico', 'lentilha', 'pinhao', 'quinoa', 'milho']
     if any(x in txt for x in legumes_keys): return 'Legumes'
-    saladas_keys = ['salada', 'alface', 'rúcula', 'rucula', 'agrião', 'agriao', 'insalata']
+    
+    saladas_keys = ['salada', 'alface', 'rucula', 'agriao', 'insalata']
     if any(x in txt for x in saladas_keys): return 'Saladas'
+    
     return 'Outros'
+
+def extract_weight_from_sku(text):
+    match = re.search(r'(\d+)\s*[gG]', str(text))
+    if match: return float(match.group(1))
+    return 0.0
+
+# ==============================================================================
+# 2. CARREGAMENTO E LEITURA DE ARQUIVOS (ROBUSTEZ)
+# ==============================================================================
 
 @st.cache_data
 def load_data(uploaded_file):
@@ -121,9 +154,11 @@ def load_data(uploaded_file):
         try: df = pd.read_csv(uploaded_file, sep=',') 
         except: df = pd.read_excel(uploaded_file)
         if df.shape[1] < 2: df = pd.read_csv(uploaded_file, sep=';')
+        
         df.columns = df.columns.str.strip()
         rename_map = {'Data':'Date', 'Dia':'Date', 'Cod- SKU':'SKU', 'Código':'SKU', 'Produto.DS_PRODUTO':'Description', 'Descrição':'Description', 'Pedidos':'Orders', 'Qtde':'Orders'}
         df = df.rename(columns=rename_map)
+        
         if 'Description' not in df.columns:
             if len(df.columns) >= 4:
                 cols = ['Date','SKU','Description','Orders']
@@ -131,10 +166,12 @@ def load_data(uploaded_file):
                 df.columns = cols + existing[4:]
             else:
                 df['Description'] = 'Prod ' + df['SKU'].astype(str)
+                
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
         df['Orders'] = pd.to_numeric(df['Orders'], errors='coerce').fillna(0)
         df['Group'] = df['Description'].apply(classify_group)
+        
         return df.groupby(['Date','SKU','Description','Group'])['Orders'].sum().reset_index()
     except Exception as e:
         st.error(f"Erro ao ler vendas: {e}")
@@ -143,19 +180,31 @@ def load_data(uploaded_file):
 @st.cache_data
 def load_recipe_data(uploaded_file):
     try:
+        # Tenta ler normal primeiro
         try: df = pd.read_csv(uploaded_file, sep=',')
         except: df = pd.read_excel(uploaded_file)
+        
+        # Se não achou colunas chave, tenta header=1 (linha 2)
+        if 'Cod' not in df.columns and 'SKU' not in df.columns:
+             try: df = pd.read_csv(uploaded_file, sep=',', header=1)
+             except: df = pd.read_excel(uploaded_file, header=1)
+
         if df.shape[1] < 2: df = pd.read_csv(uploaded_file, sep=';')
+        
         df.columns = df.columns.str.strip()
         if 'Cod' in df.columns and 'SKU' in df.columns:
             df = df.rename(columns={'SKU': 'SKU_Original_Nome'})
+            
         rename_map = {'Cod': 'SKU', 'Materia Prima': 'Ingredient', 'Composição (mg)': 'Weight_g', 'Tipo': 'Type'}
         df = df.rename(columns=rename_map)
+        
         required_cols = ['SKU', 'Ingredient', 'Weight_g', 'Type']
         cols_to_keep = [c for c in required_cols if c in df.columns]
         df = df[cols_to_keep]
+        
         if 'Weight_g' in df.columns:
             df['Weight_g'] = pd.to_numeric(df['Weight_g'], errors='coerce').fillna(0)
+            
         return df
     except Exception as e:
         st.error(f"Erro ao ler Ficha Técnica: {e}")
@@ -172,6 +221,7 @@ def load_yield_data_scenarios(uploaded_file):
         df = df[pd.to_numeric(df['Rendimento'], errors='coerce') > 0]
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
         
+        # Normalização rigorosa para cruzar com Ficha Técnica
         df['Produto'] = df['Produto'].apply(normalize_text)
         df['Fornecedor'] = df['Fornecedor'].astype(str).str.strip().str.upper()
         df['Origem'] = np.where(df['Fornecedor'] == 'VERDE PRIMA', 'VP', 'MERCADO')
@@ -180,9 +230,10 @@ def load_yield_data_scenarios(uploaded_file):
         
         results = []
         for (prod, origem), group in df.groupby(['Produto', 'Origem']):
-            val_1 = group['Rendimento'].iloc[0]
-            val_3 = group['Rendimento'].head(3).mean()
-            val_5 = group['Rendimento'].head(5).mean()
+            # Cenários de Cálculo
+            val_1 = group['Rendimento'].iloc[0] # Último
+            val_3 = group['Rendimento'].head(3).mean() # Média 3
+            val_5 = group['Rendimento'].head(5).mean() # Média 5
             
             results.append({
                 'Produto': prod,
@@ -200,16 +251,25 @@ def load_yield_data_scenarios(uploaded_file):
 @st.cache_data
 def load_availability_data(uploaded_file):
     try:
-        try: df = pd.read_csv(uploaded_file, header=1)
-        except: df = pd.read_excel(uploaded_file, header=1)
+        # Lógica inteligente para achar o cabeçalho correto
+        # Tenta header=0, se falhar tenta header=1
+        try: 
+            df = pd.read_csv(uploaded_file)
+            if 'Hortaliça' not in df.columns and df.shape[0] > 0:
+                 df = pd.read_csv(uploaded_file, header=1)
+        except: 
+            try: df = pd.read_excel(uploaded_file)
+            except: df = pd.read_excel(uploaded_file, header=1)
+            
         df.columns = df.columns.str.strip()
         
+        # Mapa de Tradução (Fazenda -> Fábrica)
         name_map = {
             'crespa verde': 'alface crespa',
             'frizzy roxa': 'frisee roxa',
             'lollo': 'lollo rossa',
             'chicoria': 'frisee chicoria',
-            'barlach': 'barlach', 
+            'barlach': 'barlach', # Novo item adicionado
         }
         
         if 'Hortaliça' in df.columns:
@@ -221,31 +281,59 @@ def load_availability_data(uploaded_file):
             
             df['Hortaliça_Traduzida'] = df['Hortaliça_Norm'].apply(translate_name)
             
+            # Identifica colunas de dias (ignora espaços extras "Segunda ")
             cols_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta']
-            cols_existentes = [c for c in cols_dias if c in df.columns]
+            cols_existentes = []
+            for c in df.columns:
+                if c.strip() in cols_dias:
+                    cols_existentes.append(c)
             
-            if not cols_existentes:
-                for c in df.columns:
-                    if c.strip() in cols_dias:
-                        df.rename(columns={c: c.strip()}, inplace=True)
-                cols_existentes = [c for c in cols_dias if c in df.columns]
+            # Renomeia para remover espaços e padronizar
+            rename_dict = {c: c.strip() for c in cols_existentes}
+            df = df.rename(columns=rename_dict)
+            cols_clean = list(rename_dict.values())
 
-            df_grouped = df.groupby('Hortaliça_Traduzida')[cols_existentes].sum().reset_index()
-            return df_grouped
+            if cols_clean:
+                df_grouped = df.groupby('Hortaliça_Traduzida')[cols_clean].sum().reset_index()
+                return df_grouped
+            else:
+                return pd.DataFrame()
         else:
             return pd.DataFrame()
     except Exception as e:
         st.error(f"Erro ao ler Disponibilidade VP: {e}")
         return pd.DataFrame()
 
-def extract_weight_from_sku(text):
-    match = re.search(r'(\d+)\s*[gG]', str(text))
-    if match: return float(match.group(1))
-    return 0.0
+# ==============================================================================
+# 3. MOTOR DE CÁLCULO E PREVISÃO
+# ==============================================================================
 
-# ==============================================================================
-# 2. MOTOR DE CÁLCULO E PREVISÃO
-# ==============================================================================
+def treat_data_interruption(df):
+    """
+    Trata a anomalia de demanda (Fev-Ago 2025).
+    Substitui os dados reais por uma interpolação para não 'sujar' o aprendizado.
+    """
+    df_clean = df.copy()
+    start_anomaly = pd.Timestamp('2025-02-01')
+    end_anomaly = pd.Timestamp('2025-08-31')
+    affected_groups = ['Saladas', 'Minis', 'Legumes']
+    
+    mask_anomaly = (
+        (df_clean['Date'] >= start_anomaly) & 
+        (df_clean['Date'] <= end_anomaly) & 
+        (df_clean['Group'].isin(affected_groups))
+    )
+    
+    if mask_anomaly.any():
+        df_clean.loc[mask_anomaly, 'Orders'] = np.nan
+        df_clean = df_clean.sort_values(['SKU', 'Date'])
+        # Interpolação linear temporal
+        df_clean['Orders'] = df_clean.groupby('SKU')['Orders'].transform(
+            lambda x: x.interpolate(method='time', limit_direction='both')
+        )
+        df_clean['Orders'] = df_clean['Orders'].fillna(0)
+        
+    return df_clean
 
 def filter_history_vero(df):
     mask_vero = df['Group'] == 'Vero'
@@ -261,6 +349,7 @@ def clean_outliers(df):
         mask = df['SKU'] == sku
         series = df.loc[mask, 'Orders']
         if len(series) < 5: continue
+        # Remove picos absurdos (Outliers)
         roll_med = series.rolling(14, min_periods=1, center=True).median()
         is_outlier = series > (roll_med * 4)
         if is_outlier.any():
@@ -280,8 +369,11 @@ def generate_features(df):
     return d
 
 def calculate_backtest_accuracy(df_raw):
+    """Calcula a acurácia (WAPE) dos últimos 7 dias REAIS (Prova Real)."""
     try:
-        df_clean = filter_history_vero(df_raw)
+        # Aplica regra de anomalia antes de testar
+        df_treated = treat_data_interruption(df_raw)
+        df_clean = filter_history_vero(df_treated)
         df_clean = clean_outliers(df_clean)
         
         last_date = df_clean['Date'].max()
@@ -326,6 +418,7 @@ def calculate_backtest_accuracy(df_raw):
         
         if X_train.empty or X_test.empty: return None, None, None
         
+        # Modelo XGBoost rápido para Backtest
         model = XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, n_jobs=-1, random_state=42)
         model.fit(X_train[features], X_train['Orders'])
         
@@ -336,6 +429,7 @@ def calculate_backtest_accuracy(df_raw):
         sum_abs_error = np.sum(np.abs(actuals - preds))
         sum_actuals = np.sum(actuals)
         
+        # WAPE (Weighted Absolute Percentage Error)
         wape = sum_abs_error / sum_actuals if sum_actuals > 0 else 0
         accuracy = max(0, 1 - wape)
         
@@ -346,7 +440,10 @@ def calculate_backtest_accuracy(df_raw):
         return None, None, None
 
 def run_forecast(df_raw, days_ahead=8):
-    df_train_base = filter_history_vero(df_raw)
+    # APLICAÇÃO DA REGRA DE HIGIENIZAÇÃO DE ANOMALIA
+    df_treated = treat_data_interruption(df_raw)
+    
+    df_train_base = filter_history_vero(df_treated)
     df_train_base = clean_outliers(df_train_base)
     
     last_date = df_train_base['Date'].max()
@@ -669,7 +766,6 @@ if uploaded_file:
                             map_dias = {0: 'Segunda', 1: 'Terça', 2: 'Quarta', 3: 'Quinta', 4: 'Sexta', 5: 'Sábado', 6: 'Domingo'}
                             df_kg_daily['DayNum'] = df_kg_daily['Date'].dt.dayofweek
                             df_kg_daily['DayName'] = df_kg_daily['DayNum'].map(map_dias)
-                            # Já está normalizado em Ingredient_Norm
                             
                             id_vars = ['Hortaliça_Traduzida']
                             val_vars = [c for c in df_avail.columns if c in map_dias.values()]
@@ -679,6 +775,7 @@ if uploaded_file:
                             df_proc = pd.merge(df_kg_daily, df_avail_melt, left_on=['Ingredient_Norm', 'DayName'], right_on=['Hortaliça_Traduzida', 'DayName'], how='left')
                             df_proc['Kg_Available'] = df_proc['Kg_Available'].fillna(0)
                             
+                            # FILTRO DATA DINÂMICO (Ignora passado)
                             today = pd.Timestamp.now().normalize()
                             df_proc = df_proc[df_proc['Date'] > today]
                             
@@ -801,7 +898,6 @@ if uploaded_file:
                                             d_str = d_str.replace('Mon', 'Seg').replace('Tue', 'Ter').replace('Wed', 'Qua').replace('Thu', 'Qui').replace('Fri', 'Sex')
                                             cols_s_fmt.append(d_str)
                                         df_surplus_view.columns = cols_s_fmt
-                                        
                                         st.dataframe(df_surplus_view.style.format("{:.1f}"), use_container_width=True)
 
                                 csv_order = df_daily_view.to_csv().encode('utf-8')
