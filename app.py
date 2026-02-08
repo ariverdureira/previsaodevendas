@@ -25,6 +25,25 @@ def normalize_text(text):
     text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII')
     return text.lower().strip()
 
+def standardize_specific_products(text):
+    """
+    Função 'Xerife' para forçar agrupamento de produtos específicos (80g/90g).
+    Aplica-se a Vendas, Receitas, Rendimento e Disponibilidade para garantir match total.
+    """
+    if not isinstance(text, str): return text
+    
+    # 1. Mini Americana (80 ou 90 -> 90g)
+    # Regex: Pega "Mini Americana", seguido de espacos, seguido de 80 ou 90, seguido opcionalmente de g/gr
+    text = re.sub(r'(?i)mini\s*americana\s*(80|90)\s*g?r?', 'Mini Americana 90g', text)
+    
+    # 2. Mini Alface Insalata PRIMA (80 ou 90 -> 90g) - Executa ANTES da comum para não confundir
+    text = re.sub(r'(?i)mini\s*alface\s*insalata\s*prima\s*(80|90)\s*g?r?', 'Mini Alface Insalata Prima 90g', text)
+    
+    # 3. Mini Alface Insalata COMUM (80 ou 90 -> 90g) - Só pega se não tiver "Prima" no meio (o regex \s* não pega palavras)
+    text = re.sub(r'(?i)mini\s*alface\s*insalata\s*(80|90)\s*g?r?', 'Mini Alface Insalata 90g', text)
+    
+    return text
+
 def get_holidays_calendar(start_date, end_date):
     try:
         br_holidays = holidays.Brazil(subdiv='SP', state='SP')
@@ -141,19 +160,17 @@ def load_data(uploaded_file):
             else:
                 df['Description'] = 'Prod ' + df['SKU'].astype(str)
         
-        # --- FIX: Agrupamento Forçado (Mini Americana, Mini Alface Insalata & Mini Alface Insalata Prima) ---
+        # --- APLICAÇÃO DA PADRONIZAÇÃO DE NOMES (AGRUPAMENTO) ---
         if 'Description' in df.columns:
-            df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
-            df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
-            df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
-        # ----------------------------------------------------------------------------------------------------
+            df['Description'] = df['Description'].apply(standardize_specific_products)
+        # --------------------------------------------------------
 
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
         df['Orders'] = pd.to_numeric(df['Orders'], errors='coerce').fillna(0)
         df['Group'] = df['Description'].apply(classify_group)
         
-        # AGREGAR POR DESCRIÇÃO PARA SOMAR OS SKUS DIFERENTES
+        # AGREGAR POR DESCRIÇÃO PARA SOMAR OS SKUS DIFERENTES QUE AGORA TÊM O MESMO NOME
         return df.groupby(['Date', 'Description', 'Group']).agg({'Orders': 'sum', 'SKU': 'first'}).reset_index()
 
     except Exception as e:
@@ -179,12 +196,10 @@ def load_recipe_data(uploaded_file):
         cols_to_keep = [c for c in required_cols if c in df.columns]
         df = df[cols_to_keep]
         
-        # --- FIX: Agrupamento Forçado na Receita ---
+        # --- APLICAÇÃO DA PADRONIZAÇÃO DE NOMES ---
         if 'Ingredient' in df.columns:
-            df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
-            df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
-            df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
-        # -------------------------------------------
+            df['Ingredient'] = df['Ingredient'].apply(standardize_specific_products)
+        # ------------------------------------------
 
         if 'Weight_g' in df.columns:
             df['Weight_g'] = pd.to_numeric(df['Weight_g'], errors='coerce').fillna(0)
@@ -203,12 +218,10 @@ def load_yield_data_scenarios(uploaded_file):
         df = df[pd.to_numeric(df['Rendimento'], errors='coerce') > 0]
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
         
-        # --- FIX: Agrupamento Forçado no Rendimento ---
+        # --- APLICAÇÃO DA PADRONIZAÇÃO DE NOMES ---
         if 'Produto' in df.columns:
-            df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
-            df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
-            df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
-        # ----------------------------------------------
+            df['Produto'] = df['Produto'].apply(standardize_specific_products)
+        # ------------------------------------------
 
         df['Produto'] = df['Produto'].apply(normalize_text)
         df['Fornecedor'] = df['Fornecedor'].astype(str).str.strip().str.upper()
@@ -253,11 +266,9 @@ def load_availability_data(uploaded_file):
             'barlach': 'barlach', 
         }
         if 'Hortaliça' in df.columns:
-            # --- FIX: Agrupamento Forçado na Disponibilidade ---
-            df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
-            df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
-            df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
-            # ---------------------------------------------------
+            # --- APLICAÇÃO DA PADRONIZAÇÃO DE NOMES ---
+            df['Hortaliça'] = df['Hortaliça'].apply(standardize_specific_products)
+            # ------------------------------------------
             
             df = df.dropna(subset=['Hortaliça'])
             df['Hortaliça_Norm'] = df['Hortaliça'].apply(normalize_text)
