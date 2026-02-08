@@ -141,11 +141,12 @@ def load_data(uploaded_file):
             else:
                 df['Description'] = 'Prod ' + df['SKU'].astype(str)
         
-        # --- FIX: Agrupamento Forçado (Mini Americana & Mini Alface Insalata) ---
+        # --- FIX: Agrupamento Forçado (Mini Americana, Mini Alface Insalata & Mini Alface Insalata Prima) ---
         if 'Description' in df.columns:
             df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
             df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
-        # ------------------------------------------------------------------------
+            df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
+        # ----------------------------------------------------------------------------------------------------
 
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
@@ -182,6 +183,7 @@ def load_recipe_data(uploaded_file):
         if 'Ingredient' in df.columns:
             df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
             df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
+            df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
         # -------------------------------------------
 
         if 'Weight_g' in df.columns:
@@ -205,6 +207,7 @@ def load_yield_data_scenarios(uploaded_file):
         if 'Produto' in df.columns:
             df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
             df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
+            df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
         # ----------------------------------------------
 
         df['Produto'] = df['Produto'].apply(normalize_text)
@@ -253,6 +256,7 @@ def load_availability_data(uploaded_file):
             # --- FIX: Agrupamento Forçado na Disponibilidade ---
             df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
             df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
+            df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*prima\s*80\s*g', 'Mini Alface Insalata Prima 90g', regex=True)
             # ---------------------------------------------------
             
             df = df.dropna(subset=['Hortaliça'])
