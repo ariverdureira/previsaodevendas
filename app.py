@@ -166,7 +166,12 @@ def load_data(uploaded_file):
                 df.columns = cols + existing[4:]
             else:
                 df['Description'] = 'Prod ' + df['SKU'].astype(str)
-                
+        
+        # --- NOVO: Agrupamento Forçado de Mini Americana ---
+        if 'Description' in df.columns:
+            df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini americana 80g', 'Mini Americana 90g', regex=True)
+        # ---------------------------------------------------
+
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
         df['Orders'] = pd.to_numeric(df['Orders'], errors='coerce').fillna(0)
@@ -180,6 +185,7 @@ def load_data(uploaded_file):
 @st.cache_data
 def load_recipe_data(uploaded_file):
     try:
+        # Tenta ler normal primeiro
         try: df = pd.read_csv(uploaded_file, sep=',')
         except: df = pd.read_excel(uploaded_file)
         
@@ -201,6 +207,11 @@ def load_recipe_data(uploaded_file):
         cols_to_keep = [c for c in required_cols if c in df.columns]
         df = df[cols_to_keep]
         
+        # --- NOVO: Agrupamento Forçado de Mini Americana ---
+        if 'Ingredient' in df.columns:
+            df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini americana 80g', 'Mini Americana 90g', regex=True)
+        # ---------------------------------------------------
+
         if 'Weight_g' in df.columns:
             df['Weight_g'] = pd.to_numeric(df['Weight_g'], errors='coerce').fillna(0)
             
@@ -220,7 +231,12 @@ def load_yield_data_scenarios(uploaded_file):
         df = df[pd.to_numeric(df['Rendimento'], errors='coerce') > 0]
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
         
-        # Normalização rigorosa
+        # --- NOVO: Agrupamento Forçado de Mini Americana ---
+        if 'Produto' in df.columns:
+            df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini americana 80g', 'Mini Americana 90g', regex=True)
+        # ---------------------------------------------------
+
+        # Normalização rigorosa para cruzar com Ficha Técnica
         df['Produto'] = df['Produto'].apply(normalize_text)
         df['Fornecedor'] = df['Fornecedor'].astype(str).str.strip().str.upper()
         df['Origem'] = np.where(df['Fornecedor'] == 'VERDE PRIMA', 'VP', 'MERCADO')
@@ -229,9 +245,10 @@ def load_yield_data_scenarios(uploaded_file):
         
         results = []
         for (prod, origem), group in df.groupby(['Produto', 'Origem']):
-            val_1 = group['Rendimento'].iloc[0] 
-            val_3 = group['Rendimento'].head(3).mean() 
-            val_5 = group['Rendimento'].head(5).mean() 
+            # Cenários de Cálculo
+            val_1 = group['Rendimento'].iloc[0] # Último
+            val_3 = group['Rendimento'].head(3).mean() # Média 3
+            val_5 = group['Rendimento'].head(5).mean() # Média 5
             
             results.append({
                 'Produto': prod,
@@ -262,9 +279,6 @@ def load_availability_data(uploaded_file):
                 if 'Hortaliça' in temp.columns:
                     df = temp
         except: 
-            pass
-            
-        if df is None:
             try: 
                 temp = pd.read_excel(uploaded_file)
                 if 'Hortaliça' in temp.columns:
@@ -287,6 +301,10 @@ def load_availability_data(uploaded_file):
         }
         
         if 'Hortaliça' in df.columns:
+            # --- NOVO: Agrupamento Forçado de Mini Americana ---
+            df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini americana 80g', 'Mini Americana 90g', regex=True)
+            # ---------------------------------------------------
+
             df = df.dropna(subset=['Hortaliça'])
             df['Hortaliça_Norm'] = df['Hortaliça'].apply(normalize_text)
             
@@ -295,6 +313,7 @@ def load_availability_data(uploaded_file):
             
             df['Hortaliça_Traduzida'] = df['Hortaliça_Norm'].apply(translate_name)
             
+            # Identifica colunas de dias (ignora espaços extras "Segunda ")
             cols_dias = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta']
             cols_existentes = []
             for c in df.columns:
@@ -368,6 +387,7 @@ def clean_outliers(df):
         mask = df['SKU'] == sku
         series = df.loc[mask, 'Orders']
         if len(series) < 5: continue
+        # Remove picos absurdos (Outliers)
         roll_med = series.rolling(14, min_periods=1, center=True).median()
         is_outlier = series > (roll_med * 4)
         if is_outlier.any():
@@ -435,6 +455,7 @@ def calculate_backtest_accuracy(df_raw):
         
         if X_train.empty or X_test.empty: return None, None, None
         
+        # Modelo XGBoost rápido para Backtest
         model = XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, n_jobs=-1, random_state=42)
         model.fit(X_train[features], X_train['Orders'])
         
@@ -445,6 +466,7 @@ def calculate_backtest_accuracy(df_raw):
         sum_abs_error = np.sum(np.abs(actuals - preds))
         sum_actuals = np.sum(actuals)
         
+        # WAPE (Weighted Absolute Percentage Error)
         wape = sum_abs_error / sum_actuals if sum_actuals > 0 else 0
         accuracy = max(0, 1 - wape)
         
@@ -455,6 +477,7 @@ def calculate_backtest_accuracy(df_raw):
         return None, None, None
 
 def run_forecast(df_raw, days_ahead=8):
+    # APLICAÇÃO DA REGRA DE HIGIENIZAÇÃO DE ANOMALIA
     df_treated = treat_data_interruption(df_raw)
     
     df_train_base = filter_history_vero(df_treated)
@@ -609,6 +632,7 @@ if uploaded_file:
 
             with st.spinner("Otimizando modelo (Auto-ML) e Analisando Dados..."):
                 try:
+                    # HORIZONTE DE 8 DIAS (NOVO)
                     days_horizon = 8
                     forecast_result, weather_result = run_forecast(df_raw, days_ahead=days_horizon)
                     if not forecast_result.empty:
@@ -647,6 +671,7 @@ if uploaded_file:
             # --- 3. RESUMO EXECUTIVO ---
             st.subheader("📊 Resumo Executivo")
             
+            # Horizonte dinâmico para resumo (8 dias)
             days_summary = 8
             f_start = max_date + timedelta(days=1)
             f_end = max_date + timedelta(days=days_summary)
