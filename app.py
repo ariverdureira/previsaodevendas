@@ -141,11 +141,11 @@ def load_data(uploaded_file):
             else:
                 df['Description'] = 'Prod ' + df['SKU'].astype(str)
         
-        # --- FIX: Agrupamento Forçado Mini Americana ---
+        # --- FIX: Agrupamento Forçado (Mini Americana & Mini Alface Insalata) ---
         if 'Description' in df.columns:
-            # Regex pega 'Mini Americana 80g', '80 g', '80G' e unifica para 90g
             df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
-        # -----------------------------------------------
+            df['Description'] = df['Description'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
+        # ------------------------------------------------------------------------
 
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
@@ -153,7 +153,6 @@ def load_data(uploaded_file):
         df['Group'] = df['Description'].apply(classify_group)
         
         # AGREGAR POR DESCRIÇÃO PARA SOMAR OS SKUS DIFERENTES
-        # Usamos 'SKU': 'first' para manter um código válido, mas a chave de soma é a Descrição
         return df.groupby(['Date', 'Description', 'Group']).agg({'Orders': 'sum', 'SKU': 'first'}).reset_index()
 
     except Exception as e:
@@ -180,8 +179,9 @@ def load_recipe_data(uploaded_file):
         df = df[cols_to_keep]
         
         # --- FIX: Agrupamento Forçado na Receita ---
-        # Garante que se houver receita para 80g, ela vire 90g para dar match
-        # Nota: O match principal é por SKU, mas isso ajuda na visualização
+        if 'Ingredient' in df.columns:
+            df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
+            df['Ingredient'] = df['Ingredient'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
         # -------------------------------------------
 
         if 'Weight_g' in df.columns:
@@ -204,6 +204,7 @@ def load_yield_data_scenarios(uploaded_file):
         # --- FIX: Agrupamento Forçado no Rendimento ---
         if 'Produto' in df.columns:
             df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
+            df['Produto'] = df['Produto'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
         # ----------------------------------------------
 
         df['Produto'] = df['Produto'].apply(normalize_text)
@@ -251,6 +252,7 @@ def load_availability_data(uploaded_file):
         if 'Hortaliça' in df.columns:
             # --- FIX: Agrupamento Forçado na Disponibilidade ---
             df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*americana\s*80\s*g', 'Mini Americana 90g', regex=True)
+            df['Hortaliça'] = df['Hortaliça'].astype(str).str.replace(r'(?i)mini\s*alface\s*insalata\s*80\s*g', 'Mini Alface Insalata 90g', regex=True)
             # ---------------------------------------------------
             
             df = df.dropna(subset=['Hortaliça'])
