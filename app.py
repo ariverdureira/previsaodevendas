@@ -33,42 +33,73 @@ def standardize_specific_products(text):
     if not isinstance(text, str): return text
     
     # 1. Mini Americana (80 ou 90 -> 90g)
-    # Regex: Pega "Mini Americana", seguido de espacos, seguido de 80 ou 90, seguido opcionalmente de g/gr
     text = re.sub(r'(?i)mini\s*americana\s*(80|90)\s*g?r?', 'Mini Americana 90g', text)
     
     # 2. Mini Alface Insalata PRIMA (80 ou 90 -> 90g) - Executa ANTES da comum para não confundir
     text = re.sub(r'(?i)mini\s*alface\s*insalata\s*prima\s*(80|90)\s*g?r?', 'Mini Alface Insalata Prima 90g', text)
     
-    # 3. Mini Alface Insalata COMUM (80 ou 90 -> 90g) - Só pega se não tiver "Prima" no meio (o regex \s* não pega palavras)
+    # 3. Mini Alface Insalata COMUM (80 ou 90 -> 90g)
     text = re.sub(r'(?i)mini\s*alface\s*insalata\s*(80|90)\s*g?r?', 'Mini Alface Insalata 90g', text)
     
     return text
 
 def get_holidays_calendar(start_date, end_date):
+    """Gera calendário de feriados com CÁLCULO AUTOMÁTICO DE CARNAVAL (Apenas Terça)."""
     try:
+        # Feriados Oficiais
         br_holidays = holidays.Brazil(subdiv='SP', state='SP')
         high_impact_fixed = {(12, 25): "Natal", (1, 1): "Ano Novo"}
+        
         data = []
         years = list(range(start_date.year, end_date.year + 1))
+        
         mothers_days = []
         fathers_days = []
+        carnival_dates = [] 
+        
         for year in years:
+            # 1. Dia das Mães/Pais
             may_sundays = pd.date_range(start=f'{year}-05-01', end=f'{year}-05-31', freq='W-SUN')
             if len(may_sundays) >= 2: mothers_days.append(may_sundays[1].date())
+            
             aug_sundays = pd.date_range(start=f'{year}-08-01', end=f'{year}-08-31', freq='W-SUN')
             if len(aug_sundays) >= 2: fathers_days.append(aug_sundays[1].date())
+            
+            # 2. CÁLCULO DE CARNAVAL (Baseado na Páscoa/Sexta Santa)
+            holidays_in_year = holidays.Brazil(years=year)
+            good_friday = None
+            for date, name in holidays_in_year.items():
+                if "Sexta-feira Santa" in name or "Good Friday" in name:
+                    good_friday = date
+                    break
+            
+            if good_friday:
+                # Matemática do Calendário:
+                # Terça Carnaval = Sexta Santa - 45 dias (FERIADO)
+                carnival_tue = good_friday - timedelta(days=45)
+                carnival_dates.append(carnival_tue)
+                
+                # OBS: Segunda-feira de Carnaval (Sexta Santa - 46 dias) foi removida.
+                # O sistema considerará a segunda-feira como dia útil normal.
+
         date_range = pd.date_range(start_date, end_date)
         for d in date_range:
             d_date = d.date()
             is_hol = 0
             is_high = 0
-            if d_date in br_holidays:
+            
+            # Verifica Feriados Oficiais OU Carnaval Calculado (Apenas Terça)
+            if d_date in br_holidays or d_date in carnival_dates:
                 is_hol = 1
+                
+                # Alto Impacto
                 if (d.month, d.day) in high_impact_fixed: is_high = 1
-                if br_holidays.get(d_date) == "Sexta-feira Santa": is_high = 1
+                if d_date in br_holidays and br_holidays.get(d_date) == "Sexta-feira Santa": is_high = 1
+                
             if d_date in mothers_days or d_date in fathers_days:
                 is_hol = 1 
                 is_high = 1 
+                
             data.append({'Date': d, 'IsHoliday': is_hol, 'IsHighImpact': is_high})
         return pd.DataFrame(data)
     except:
@@ -160,17 +191,16 @@ def load_data(uploaded_file):
             else:
                 df['Description'] = 'Prod ' + df['SKU'].astype(str)
         
-        # --- APLICAÇÃO DA PADRONIZAÇÃO DE NOMES (AGRUPAMENTO) ---
+        # --- APLICAÇÃO DA PADRONIZAÇÃO DE NOMES ---
         if 'Description' in df.columns:
             df['Description'] = df['Description'].apply(standardize_specific_products)
-        # --------------------------------------------------------
+        # ------------------------------------------
 
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df = df.dropna(subset=['Date'])
         df['Orders'] = pd.to_numeric(df['Orders'], errors='coerce').fillna(0)
         df['Group'] = df['Description'].apply(classify_group)
         
-        # AGREGAR POR DESCRIÇÃO PARA SOMAR OS SKUS DIFERENTES QUE AGORA TÊM O MESMO NOME
         return df.groupby(['Date', 'Description', 'Group']).agg({'Orders': 'sum', 'SKU': 'first'}).reset_index()
 
     except Exception as e:
